@@ -26,9 +26,24 @@ def build_sweep_potentials(
     rev = np.linspace(v_vertex, v_end, n_rev + 1)[1:]  # avoid duplicating vertex point
 
     single_cycle = np.concatenate([fwd, rev])
+
     if n_cycles <= 1:
         return single_cycle
-    return np.tile(single_cycle, n_cycles)
+    
+    cycles = [single_cycle]
+    
+    for _ in range(1, n_cycles):
+        if not np.isclose(v_end, v_start):
+            link = np.linspace(
+                v_end,
+                v_start,
+                max(2, int(round(abs(v_start - v_end) / step)) + 1)
+            )[1:]
+            cycles.append(link)
+    
+        cycles.append(single_cycle[1:])
+    
+    return np.concatenate(cycles)
 
 
 def voltage_to_current_a(measured_v: float, cfg=CFG) -> float:
