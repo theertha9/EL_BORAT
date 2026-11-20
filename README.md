@@ -1,4 +1,4 @@
-# Enhancement of an Existing Cyclic Voltammetry Setup (ExpEYES-17 / SEELab3)
+# Enhancement of an Existing Cyclic .Voltammetry Setup (ExpEYES-17 / SEELab3)
 
 **Team BORAT** | Department of Computer Science and Engineering, RV College of Engineering (RVCE)  
 **Mentor:** Dr. Rajesh BM  
