@@ -55,6 +55,10 @@ class HardwareConfig:
     target_rsd_pct: float = 5.0     # <= 5% repeatability across >=3 repeats
     def __post_init__(self) -> None:
 
+        # Validate cycle count
+        if isinstance(self.n_cycles, bool) or not isinstance(self.n_cycles, int) or self.n_cycles <= 0:
+            raise ValueError("n_cycles must be a positive integer")
+
         # Validate potential limits
         potentials = (self.v_start, self.v_vertex, self.v_end)
 
@@ -150,6 +154,7 @@ class HardwareConfig:
                 raise ValueError("electrode_area_cm2 must be positive")
 
 CFG = HardwareConfig()
+
 
 
 
