@@ -40,7 +40,7 @@ class HardwareConfig:
     max_peak_shift_v: float = 0.010 # < 10 mV
     max_peak_current_rel_change: float = 0.05  # < 5%
 
-        # Acquisition timing
+    # Acquisition timing
     equilibration_s: float = 2.0
     avg_window_s: float = 0.10  # 5 periods at 50 Hz
     max_rate_error_pct: float = 5.0
