@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -558,39 +557,134 @@ def analyze_single_csv(
     plot_path = None
 
     if save_plot:
-        fig, ax = plt.subplots(figsize=(8, 4.8))
+        fig, ax = plt.subplots(figsize=(10, 7.5), facecolor="white")
+        ax.set_facecolor("white")
 
-        ax.plot(
-            pot,
-            curr,
-            color="0.65",
-            lw=1.2,
-            label="Raw (preserved)",
+        area_cm2 = CFG.electrode_area_cm2
+        if area_cm2 is not None and area_cm2 > 0.0:
+            plot_curr = curr / (area_cm2 * 1000.0)
+            plot_filtered = (
+                filtered_traces["savgol"] / (area_cm2 * 1000.0)
+                if "savgol" in filtered_traces
+                else plot_curr
+            )
+            y_label = "Current density [mA cm$^{-2}$]"
+        else:
+            plot_curr = curr
+            plot_filtered = (
+                filtered_traces["savgol"]
+                if "savgol" in filtered_traces
+                else curr
+            )
+            y_label = "Current [µA]"
+
+        ax.plot(pot, plot_filtered, color="black", linewidth=1.8)
+
+        ax.set_xlabel("Potential [V]", fontsize=20, fontweight="bold")
+        ax.set_ylabel(y_label, fontsize=20, fontweight="bold")
+        ax.tick_params(
+            axis="both",
+            which="major",
+            labelsize=18,
+            width=1.5,
+            length=8,
         )
+        for spine in ax.spines.values():
+            spine.set_linewidth(1.5)
+            spine.set_color("black")
 
-        if "savgol" in filtered_traces:
-            ax.plot(
-                pot,
-                filtered_traces["savgol"],
-                lw=1.8,
-                label="Savitzky-Golay",
+        x_min = float(np.min(pot))
+        x_max = float(np.max(pot))
+        ax.set_xlim(x_min - 0.05, x_max + 0.20)
+
+        y_min = float(np.min(plot_curr))
+        y_max = float(np.max(plot_curr))
+        y_span = max(y_max - y_min, 1e-9)
+        ax.set_ylim(y_min - 0.12 * y_span, y_max + 0.12 * y_span)
+
+        x_ticks = np.arange(-0.2, 0.801, 0.2)
+        ax.set_xticks(x_ticks)
+
+        ax.grid(False)
+
+        epa = raw_peaks["epa_v"]
+        ipa = raw_peaks["ipa"]
+        epc = raw_peaks["epc_v"]
+        ipc = raw_peaks["ipc"]
+        if area_cm2 is not None and area_cm2 > 0.0:
+            ipa = ipa / (area_cm2 * 1000.0)
+            ipc = ipc / (area_cm2 * 1000.0)
+
+        y_low, y_high = ax.get_ylim()
+        if np.isfinite(epa) and np.isfinite(ipa):
+            ax.vlines(
+                epa, y_low, ipa,
+                colors="black",
+                linestyles=(0, (7, 5)),
+                linewidth=1.6,
+            )
+            ax.hlines(
+                ipa, x_min - 0.05, epa,
+                colors="black",
+                linestyles=(0, (7, 5)),
+                linewidth=1.6,
+            )
+            ax.annotate(
+                "E$_{PA}$",
+                xy=(epa, y_high),
+                xytext=(0, -2),
+                textcoords="offset points",
+                ha="center",
+                va="top",
+                fontsize=22,
+                fontweight="bold",
+            )
+            ax.annotate(
+                "j$_{PA}$",
+                xy=(epa, ipa),
+                xytext=(12, -24),
+                textcoords="offset points",
+                ha="left",
+                va="top",
+                fontsize=20,
+                fontweight="bold",
             )
 
-        if "median" in filtered_traces:
-            ax.plot(
-                pot,
-                filtered_traces["median"],
-                lw=1.5,
-                label="Median",
+        if np.isfinite(epc) and np.isfinite(ipc):
+            ax.vlines(
+                epc, y_low, ipc,
+                colors="black",
+                linestyles=(0, (7, 5)),
+                linewidth=1.6,
+            )
+            ax.hlines(
+                ipc, x_min - 0.05, epc,
+                colors="black",
+                linestyles=(0, (7, 5)),
+                linewidth=1.6,
+            )
+            ax.annotate(
+                "j$_{PC}$",
+                xy=(epc, ipc),
+                xytext=(12, -12),
+                textcoords="offset points",
+                ha="left",
+                va="top",
+                fontsize=20,
+                fontweight="bold",
+            )
+            ax.annotate(
+                "E$_{PC}$",
+                xy=(epc, y_low),
+                xytext=(0, -14),
+                textcoords="offset points",
+                ha="center",
+                va="top",
+                fontsize=22,
+                fontweight="bold",
             )
 
-        ax.set_xlabel("Potential E (V)")
-        ax.set_ylabel("Current (µA)")
-        ax.set_title(f"Voltammogram: {raw_csv_path.stem}")
-        ax.grid(True, alpha=0.3)
-        ax.legend()
-
-        fig.tight_layout()
+        fig.tight_layout(pad=1.0)
 
         plot_path = raw_csv_path.with_suffix(".png")
         fig.savefig(plot_path, dpi=200)
@@ -605,3 +699,4 @@ def analyze_single_csv(
         "raw_peaks": raw_peaks,
         "filters": filter_results,
     }
+
