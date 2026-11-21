@@ -42,13 +42,10 @@ def estimate_noise_metrics(current: np.ndarray) -> dict:
             "snr_linear": np.nan,
             "snr_db": np.nan,
         }
-
     diff = np.diff(current)
     median_diff = np.median(diff)
     mad = np.median(np.abs(diff - median_diff))
-    if not np.isfinite(noise_std) or noise_std <= 0:
-        raise ValueError("A valid positive noise estimate is required.")
-
+    
     noise_sigma = float(1.4826 * mad / np.sqrt(2.0))
     signal_peak = float(np.max(np.abs(current)))
 
