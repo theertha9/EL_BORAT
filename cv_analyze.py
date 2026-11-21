@@ -557,7 +557,7 @@ def analyze_single_csv(
     plot_path = None
 
     if save_plot:
-        fig, ax = plt.subplots(figsize=(10, 7.5), facecolor="white")
+        fig, ax = plt.subplots(figsize=(10, 7), facecolor="white")
         ax.set_facecolor("white")
 
         area_cm2 = CFG.electrode_area_cm2
@@ -578,16 +578,60 @@ def analyze_single_csv(
             )
             y_label = "Current [µA]"
 
-        ax.plot(pot, plot_filtered, color="black", linewidth=1.8)
+        fwd_order = np.argsort(pot[:vertex_idx + 1])
+        rev_order = np.argsort(pot[vertex_idx:])[::-1]
+
+        fwd_pot = pot[:vertex_idx + 1][fwd_order]
+        rev_pot = pot[vertex_idx:][rev_order]
+        fwd_curr = plot_curr[:vertex_idx + 1][fwd_order]
+        rev_curr = plot_curr[vertex_idx:][rev_order]
+        fwd_filtered = plot_filtered[:vertex_idx + 1][fwd_order]
+        rev_filtered = plot_filtered[vertex_idx:][rev_order]
+
+        ax.plot(
+            fwd_pot,
+            fwd_curr,
+            color="black",
+            linewidth=1.0,
+            alpha=0.9,
+            zorder=2,
+        )
+        ax.plot(
+            rev_pot,
+            rev_curr,
+            color="black",
+            linewidth=1.0,
+            alpha=0.9,
+            zorder=2,
+        )
+        ax.plot(
+            fwd_pot,
+            fwd_filtered,
+            color="red",
+            linewidth=1.8,
+            alpha=0.95,
+            zorder=3,
+        )
+        ax.plot(
+            rev_pot,
+            rev_filtered,
+            color="red",
+            linewidth=1.8,
+            alpha=0.95,
+            zorder=3,
+        )
 
         ax.set_xlabel("Potential [V]", fontsize=20, fontweight="bold")
         ax.set_ylabel(y_label, fontsize=20, fontweight="bold")
+        ax.xaxis.set_label_coords(0.5, -0.10)
+        ax.yaxis.set_label_coords(-0.12, 0.5)
         ax.tick_params(
             axis="both",
             which="major",
             labelsize=18,
             width=1.5,
             length=8,
+            direction="out",
         )
         for spine in ax.spines.values():
             spine.set_linewidth(1.5)
@@ -595,7 +639,7 @@ def analyze_single_csv(
 
         x_min = float(np.min(pot))
         x_max = float(np.max(pot))
-        ax.set_xlim(x_min - 0.05, x_max + 0.20)
+        ax.set_xlim(-0.25, 0.85)
 
         y_min = float(np.min(plot_curr))
         y_max = float(np.max(plot_curr))
@@ -604,6 +648,12 @@ def analyze_single_csv(
 
         x_ticks = np.arange(-0.2, 0.801, 0.2)
         ax.set_xticks(x_ticks)
+        ax.xaxis.set_major_formatter(
+            plt.FuncFormatter(lambda value, _: f"{value:.1f}")
+        )
+        ax.yaxis.set_major_formatter(
+            plt.FuncFormatter(lambda value, _: f"{value:g}")
+        )
 
         ax.grid(False)
 
@@ -624,7 +674,7 @@ def analyze_single_csv(
                 linewidth=1.6,
             )
             ax.hlines(
-                ipa, x_min - 0.05, epa,
+                ipa, ax.get_xlim()[0], epa,
                 colors="black",
                 linestyles=(0, (7, 5)),
                 linewidth=1.6,
@@ -642,10 +692,10 @@ def analyze_single_csv(
             ax.annotate(
                 "j$_{PA}$",
                 xy=(epa, ipa),
-                xytext=(12, -24),
+                xytext=(12, 0),
                 textcoords="offset points",
                 ha="left",
-                va="top",
+                va="center",
                 fontsize=20,
                 fontweight="bold",
             )
@@ -658,7 +708,7 @@ def analyze_single_csv(
                 linewidth=1.6,
             )
             ax.hlines(
-                ipc, x_min - 0.05, epc,
+                ipc, ax.get_xlim()[0], epc,
                 colors="black",
                 linestyles=(0, (7, 5)),
                 linewidth=1.6,
@@ -666,10 +716,10 @@ def analyze_single_csv(
             ax.annotate(
                 "j$_{PC}$",
                 xy=(epc, ipc),
-                xytext=(12, -12),
+                xytext=(12, -18),
                 textcoords="offset points",
                 ha="left",
-                va="top",
+                va="center",
                 fontsize=20,
                 fontweight="bold",
             )
@@ -699,4 +749,6 @@ def analyze_single_csv(
         "raw_peaks": raw_peaks,
         "filters": filter_results,
     }
+
+
 
