@@ -8,14 +8,17 @@ from config import DATA_DIR
 POWER_STATES = ("idle", "sensing", "scan", "transfer")
 
 
-def sample_power_monitor(monitor_reader=None) -> tuple[float, float]:
+def sample_power_monitor(monitor_reader=None) -> Tuple[float, float]:
     """
     Return (bus_voltage_v, current_ma).
     Connect `monitor_reader` (e.g., INA219/ESP32 serial or I2C helper) once wired.
     """
-    if monitor_reader is not None:
-        return monitor_reader()
-    return (3.70, 0.0)  # placeholder when no power monitor is attached
+    if monitor_reader is None:
+        raise RuntimeError(
+            "No power monitor attached. Cannot collect real power measurements."
+        )
+
+return monitor_reader()
 
 
 def profile_state(
@@ -26,6 +29,11 @@ def profile_state(
 ) -> pd.DataFrame:
     if state_name not in POWER_STATES:
         raise ValueError(f"State must be one of {POWER_STATES}, got '{state_name}'.")
+    if not np.isfinite(duration_s) or duration_s <= 0:
+        raise ValueError("duration_s must be a finite positive number.")
+    
+    if not np.isfinite(sample_interval_s) or sample_interval_s <= 0:
+        raise ValueError("sample_interval_s must be a finite positive number.")
 
     records = []
     t_start = time.perf_counter()
@@ -58,7 +66,7 @@ def run_four_state_power_profile(duration_per_state_s: float = 2.0, monitor_read
         full_df.groupby("state", sort=False)[["voltage_v", "current_ma", "power_mw"]]
         .agg(["mean", "std", "max"])
     )
-    out_path = DATA_DIR / f"power_profile_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    out_path = DATA_DIR / f"power_profile_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.csv"
     full_df.to_csv(out_path, index=False)
     summary_path = out_path.with_name(out_path.stem + "_summary.csv")
     summary.to_csv(summary_path)
