@@ -1,5 +1,5 @@
 from pathlib import Path
-
+import json
 import matplotlib
 matplotlib.use("Agg")
 
@@ -29,6 +29,7 @@ def estimate_noise_metrics(current: np.ndarray, baseline_fraction: float = 0.15)
         median_diff = np.median(diff)
         mad = np.median(np.abs(diff - median_diff))
         noise_std = float(1.4826 * mad / np.sqrt(2))
+        
     signal_peak = float(np.max(np.abs(current)))
     snr_linear = (signal_peak / noise_std) if noise_std > 0 else np.inf
     snr_db = float(20.0 * np.log10(snr_linear)) if np.isfinite(snr_linear) and snr_linear > 0 else np.inf
@@ -63,9 +64,11 @@ def apply_filter(
         return y
 
     if method == "median":
-        k = min(median_kernel, len(y) if len(y) % 2 == 1 else len(y) - 1)
-        k = max(3, k)
-        return medfilt(y, kernel_size=k)
+        return median_filter(
+        y,
+        size=kernel_samples,
+        mode="nearest"
+        )
 
     fs = 1.0 / dt_s if dt_s > 0 else 100.0
     nyq = 0.5 * fs
@@ -78,16 +81,34 @@ def apply_filter(
         return y
 
     if method == "notch50":
-        w0 = notch_freq_hz / nyq
-        if 0 < w0 < 1:
-            b, a = iirnotch(w0=w0, Q=30.0)
-            return filtfilt(b, a, y, padlen=min(15, len(y) - 1))
+        fs = 1.0 / dt_s
+    
+        if fs <= 2 * notch_freq_hz:
+            raise ValueError(
+                f"Cannot apply {notch_freq_hz} Hz notch: "
+                f"sampling rate is {fs:.2f} Hz. "
+                f"Sampling rate must exceed {2 * notch_freq_hz} Hz."
+            )
+    
+        b, a = iirnotch(
+            w0=notch_freq_hz,
+            Q=30.0,
+            fs=fs
+        )
+        return filtfilt(b, a, y)
         return y
 
     raise ValueError(f"Unknown filter method: {method}")
 
 
-def extract_peaks(potential_v: np.ndarray, current: np.ndarray) -> dict:
+def extract_peaks(
+        potential_v: np.ndarray,
+        current: np.ndarray,
+        v_cmd_v: np.ndarray,
+        v_start: float,
+        v_vertex: float,
+        noise_std: float,
+    ) -> dict:
     """
     Split sweep at vertex (index of max potential) into forward (anodic) and
     reverse (cathodic) branches and find max/min current peaks.
@@ -96,8 +117,15 @@ def extract_peaks(potential_v: np.ndarray, current: np.ndarray) -> dict:
     fwd_e, fwd_i = potential_v[: vertex_idx + 1], current[: vertex_idx + 1]
     rev_e, rev_i = potential_v[vertex_idx:], current[vertex_idx:]
 
-    anodic_idx = int(np.argmax(fwd_i))
-    cathodic_idx = int(np.argmin(rev_i))
+    anodic_candidates, _ = find_peaks(
+        fwd_i,
+        prominence=5.0 * noise_std
+    )
+    
+    cathodic_candidates, _ = find_peaks(
+        -rev_i,
+        prominence=5.0 * noise_std
+    )
 
     return {
         "epa_v": float(fwd_e[anodic_idx]),
@@ -105,7 +133,16 @@ def extract_peaks(potential_v: np.ndarray, current: np.ndarray) -> dict:
         "epc_v": float(rev_e[cathodic_idx]),
         "ipc": float(rev_i[cathodic_idx]),
     }
+def select_peak(values, candidates):
+    if len(candidates) == 0:
+        return np.nan
 
+    prominences = find_peaks(
+        values if values is not rev_i else -values,
+        prominence=0
+    )[1]["prominences"]
+
+    return int(candidates[np.argmax(prominences)])
 
 def evaluate_filter_against_raw(
     potential_v: np.ndarray,
@@ -148,11 +185,17 @@ def evaluate_filter_against_raw(
 def compute_repeat_rsd(values: list[float]) -> float:
     """Relative Standard Deviation (RSD %) across >=3 repeat measurements."""
     arr = np.asarray(values, dtype=float)
-    mean = float(np.mean(arr))
-    if mean == 0 or len(arr) < 2:
+    arr = arr[np.isfinite(arr)]
+    
+    if len(arr) < 3:
         return np.nan
-    return float((np.std(arr, ddof=1) / abs(mean)) * 100.0)
-
+    
+    mean = float(np.mean(arr))
+    
+    if mean == 0:
+        return np.nan
+        return float((np.std(arr, ddof=1) / abs(mean)) * 100.0)
+    
 
 def analyze_single_csv(
     raw_csv_path: Path,
