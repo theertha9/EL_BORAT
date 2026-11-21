@@ -42,7 +42,7 @@ class HardwareConfig:
 
     # Acquisition timing
     equilibration_s: float = 2.0
-    avg_window_s: float = 0.10  # 5 periods at 50 Hz
+    avg_window_s: float = 0.08  # 5 periods at 50 Hz
     max_rate_error_pct: float = 5.0
 
     # Input voltage ranges (configure after verifying hardware support)
@@ -101,6 +101,9 @@ class HardwareConfig:
         # Validate channel mapping
         p_channel = self.potential_channel.strip().upper()
         i_channel = self.current_channel.strip().upper()
+        
+        object.__setattr__(self, "potential_channel", p_channel)
+        object.__setattr__(self, "current_channel", i_channel)
 
         if not p_channel or not i_channel:
             raise ValueError("Channel names cannot be empty")
