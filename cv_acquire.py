@@ -61,22 +61,16 @@ def voltage_to_current_a(measured_v: float, cfg=CFG) -> float:
         raise ValueError(f"Unsupported current_mode: {cfg.current_mode}")
     return float(raw_i * cfg.current_sign)
 
-
+    
 def read_temperature_c(p=None, fallback_c: float | None = None) -> float | None:
     """
-    Hook for DS18B20 (1-Wire), thermistor on analog channel, or microcontroller bridge.
-    Replace with concrete sensor read once audited on the lab hardware.
+    Temperature sensor placeholder.
+
+    Until a real sensor is connected, return the manually supplied
+    fallback temperature, or None if no value was supplied.
     """
-    temp_source = (
-        "manual"
-        if temp_c_override is not None
-        else "stub"
-    )
-    "temperature": {
-        "value_c": temp_c_override,
-        "source": temp_source,
-    },
     return fallback_c
+
 
 
 def acquire_cv_scan(
@@ -86,121 +80,233 @@ def acquire_cv_scan(
     ph_measured_between_scans: float | None = None,
     temp_c_override: float | None = None,
     cfg=CFG,
+) -> tuple[Path, Path]:
+    
     if not cfg.calibrated:
         print(
             "WARNING: FRONT END IS NOT CALIBRATED. "
             "Current measurements are not validated."
-    )
-) -> tuple[Path, Path]:
+        )
+
     """
     Execute a cyclic voltammetry sweep using PV1 and log raw data to CSV + JSON metadata.
     Never overwrites or mutates raw data after writing.
     """
+    
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    ts_slug = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Use microseconds to reduce filename collisions.
+    ts_slug = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     base_name = f"cv_raw_{run_label}_rep{repeat_idx}_{ts_slug}"
+
     raw_csv_path = DATA_DIR / f"{base_name}.csv"
     meta_json_path = DATA_DIR / f"{base_name}.meta.json"
 
+    # Build the complete commanded potential sequence.
     potentials = build_sweep_potentials(
-        cfg.v_start, cfg.v_vertex, cfg.v_end, cfg.step_v, cfg.n_cycles
+        cfg.v_start,
+        cfg.v_vertex,
+        cfg.v_end,
+        cfg.step_v,
+        cfg.n_cycles,
     )
-    dt_step = cfg.step_v / cfg.scan_rate_v_per_s
-    if cfg.avg_window_s > dt_step:
+
+    # Validate acquisition timing.
+    if cfg.scan_rate_v_per_s <= 0:
+        raise ValueError("scan_rate_v_per_s must be positive.")
+
+    if cfg.avg_window_s <= 0:
+        raise ValueError("avg_window_s must be positive.")
+
+    if cfg.equilibration_s < 0:
+        raise ValueError("equilibration_s cannot be negative.")
+
+    # Average over complete 20 ms mains periods.
+    mains_period_s = 0.020
+    n_periods = round(cfg.avg_window_s / mains_period_s)
+
+    if n_periods < 1 or not np.isclose(
+        cfg.avg_window_s,
+        n_periods * mains_period_s,
+        atol=1e-6,
+    ):
         raise ValueError(
-            "Averaging window exceeds the available step interval."
+            "avg_window_s must be a positive whole multiple of 0.020 seconds."
         )
 
-    rows = []
-    t0 = time.perf_counter()
-    start_utc = datetime.now(timezone.utc).isoformat()
+    # Calculate the actual time interval between commanded points.
+    # This accounts for linspace rounding and cycle-link ramps.
+    step_distances = np.abs(np.diff(potentials))
+    step_intervals = step_distances / cfg.scan_rate_v_per_s
 
-    # Move smoothly to initial potential
-    p.set_pv1(float(potentials[0]))
-    time.sleep(cfg.equilibration_s)
-    sweep_t0 = time.perf_counter()
-    for idx, v_cmd in enumerate(potentials):
-        deadline = sweep_t0 + idx * dt_step
-    
-        p.set_pv1(float(v_cmd))
-    
-        remaining = deadline - time.perf_counter()
-        if remaining > 0:
-            time.sleep(remaining)
+    positive_intervals = step_intervals[step_intervals > 0]
 
-        t_rel = time.perf_counter() - t0
-        window_start = time.perf_counter()
-        potential_samples = []
-        current_samples = []
-        
-        while time.perf_counter() - window_start < cfg.avg_window_s:
-            potential_samples.append(
-                float(p.get_voltage(cfg.potential_channel))
-            )
-            current_samples.append(
-                float(p.get_voltage(cfg.current_channel))
-            )
-        
-        v_meas = float(np.mean(potential_samples))
-        v_curr_node = float(np.mean(current_samples))
-        i_a = voltage_to_current_a(v_curr_node, cfg)
-        temp_c = read_temperature_c(p, fallback_c=temp_c_override)
-        period_s = 0.020
-        elapsed = rows[-1]["t_rel_s"] - rows[0]["t_rel_s"]
-
-    if elapsed > 0:
-        achieved_rate = (
-            abs(rows[-1]["v_cmd_v"] - rows[0]["v_cmd_v"]) / elapsed
+    if len(positive_intervals) and (
+        cfg.avg_window_s > float(np.min(positive_intervals))
+    ):
+        raise ValueError(
+            "Averaging window is longer than the shortest potential-step interval."
         )
-    else:
-        achieved_rate = np.nan
-    
-    rate_error_pct = (
-        abs(achieved_rate - cfg.scan_rate_v_per_s)
-        / cfg.scan_rate_v_per_s * 100
+
+    # Cumulative deadlines for each potential point.
+    step_offsets = np.concatenate(
+        ([0.0], np.cumsum(step_intervals))
     )
 
-        rows.append(
-            {
-                "sample_idx": idx,
-                "t_rel_s": t_rel,
-                "v_cmd_v": float(v_cmd),
-                "v_meas_v": v_meas,
-                "v_curr_sense_v": v_curr_node,
-                "current_a": i_a,
-                "current_ua": i_a * 1e6,
-                "temp_c": temp_c,
-                "step_elapsed_s": time.perf_counter() - step_start,
-            }
-        )
-        
-
-    # Return PV1 safely to 0 V after sweep
     rows = []
-    error_message = None
+    command_times = []
+
+    acquisition_error = None
+    reset_error = None
     complete = False
-    
+
+    start_utc = datetime.now(timezone.utc).isoformat()
+    t0 = time.perf_counter()
+
+    # Temperature source is explicitly recorded.
+    temperature_source = (
+        "manual" if temp_c_override is not None else "stub"
+    )
+
     try:
-        # Equilibration and acquisition loop here
+        # Move to initial potential and allow the electrode to equilibrate.
+        p.set_pv1(float(potentials[0]))
+        time.sleep(cfg.equilibration_s)
+
+        sweep_t0 = time.perf_counter()
+
+        for idx, v_cmd in enumerate(potentials):
+
+            # Use absolute deadlines rather than repeatedly sleeping
+            # for a fixed interval. This limits accumulated timing drift.
+            deadline = sweep_t0 + step_offsets[idx]
+
+            remaining = deadline - time.perf_counter()
+
+            if remaining > 0:
+                time.sleep(remaining)
+
+            # The first potential was already set before equilibration.
+            if idx > 0:
+                p.set_pv1(float(v_cmd))
+
+            command_time = time.perf_counter()
+            command_times.append(command_time)
+
+            step_start = command_time
+            window_start = time.perf_counter()
+
+            potential_samples = []
+            current_samples = []
+
+            # Collect readings throughout the averaging window.
+            while (
+                time.perf_counter() - window_start
+                < cfg.avg_window_s
+            ):
+                potential_samples.append(
+                    float(p.get_voltage(cfg.potential_channel))
+                )
+
+                current_samples.append(
+                    float(p.get_voltage(cfg.current_channel))
+                )
+
+            window_end = time.perf_counter()
+
+            if not potential_samples or not current_samples:
+                raise RuntimeError(
+                    f"No readings collected at sample {idx}."
+                )
+
+            # Average readings without modifying the raw instrument values.
+            v_meas = float(np.mean(potential_samples))
+            v_curr_node = float(np.mean(current_samples))
+
+            i_a = voltage_to_current_a(v_curr_node, cfg)
+
+            temp_c = read_temperature_c(
+                p,
+                fallback_c=temp_c_override,
+            )
+
+            # Use the midpoint of the averaging window as its timestamp.
+            t_rel = (
+                (window_start + window_end) / 2.0
+            ) - t0
+
+            rows.append(
+                {
+                    "sample_idx": idx,
+                    "t_rel_s": t_rel,
+                    "v_cmd_v": float(v_cmd),
+                    "v_meas_v": v_meas,
+                    "v_curr_sense_v": v_curr_node,
+                    "current_a": i_a,
+                    "current_ua": i_a * 1e6,
+                    "temp_c": temp_c,
+                    "step_elapsed_s": window_end - step_start,
+                }
+            )
+
         complete = True
-    
+
     except Exception as exc:
-        error_message = repr(exc)
-        raise
-    
+        acquisition_error = repr(exc)
+
     finally:
+        # Always attempt to return PV1 to zero, including after failures.
         try:
             p.set_pv1(0.0)
-        except Exception as reset_exc:
-            error_message = (
-                f"{error_message}; PV1 reset failed: {reset_exc}"
-                if error_message
-                else f"PV1 reset failed: {reset_exc}"
+        except Exception as exc:
+            reset_error = repr(exc)
+
+    # Calculate achieved scan rate from actual commanded path distance
+    # and actual time between the first and last commands.
+    achieved_rate = None
+    rate_error_pct = None
+
+    if len(command_times) >= 2:
+        actual_duration = command_times[-1] - command_times[0]
+        total_path_distance = float(np.sum(step_distances))
+
+        if actual_duration > 0:
+            achieved_rate = total_path_distance / actual_duration
+
+            rate_error_pct = (
+                abs(achieved_rate - cfg.scan_rate_v_per_s)
+                / cfg.scan_rate_v_per_s
+                * 100.0
             )
 
-    # Save partial data and metadata here
+    rate_within_tolerance = (
+        None
+        if rate_error_pct is None
+        else rate_error_pct <= cfg.max_rate_error_pct
+    )
 
-    df = pd.DataFrame(rows)
+    if rate_error_pct is not None and not rate_within_tolerance:
+        print(
+            f"WARNING: Scan-rate error is {rate_error_pct:.2f}%, "
+            f"exceeding the allowed {cfg.max_rate_error_pct:.2f}%."
+        )
+
+    # Use fixed columns so even an interrupted scan produces a readable CSV.
+    csv_columns = [
+        "sample_idx",
+        "t_rel_s",
+        "v_cmd_v",
+        "v_meas_v",
+        "v_curr_sense_v",
+        "current_a",
+        "current_ua",
+        "temp_c",
+        "step_elapsed_s",
+    ]
+
+    df = pd.DataFrame(rows, columns=csv_columns)
+
+    # Exclusive creation: do not overwrite an existing raw data file.
     with raw_csv_path.open("x", encoding="utf-8", newline="") as f:
         df.to_csv(f, index=False)
 
@@ -209,6 +315,7 @@ def acquire_cv_scan(
         "run_label": run_label,
         "repeat_idx": repeat_idx,
         "raw_csv": raw_csv_path.name,
+
         "scan_params": {
             "v_start": cfg.v_start,
             "v_vertex": cfg.v_vertex,
@@ -218,6 +325,7 @@ def acquire_cv_scan(
             "n_cycles": cfg.n_cycles,
             "calibrated": cfg.calibrated,
         },
+
         "acquisition": {
             "equilibration_s": cfg.equilibration_s,
             "avg_window_s": cfg.avg_window_s,
@@ -225,9 +333,13 @@ def acquire_cv_scan(
             "achieved_scan_rate_v_per_s": achieved_rate,
             "rate_error_pct": rate_error_pct,
             "max_rate_error_pct": cfg.max_rate_error_pct,
+            "rate_within_tolerance": rate_within_tolerance,
+            "n_samples_saved": len(rows),
             "complete": complete,
-            "error": error_message,
+            "acquisition_error": acquisition_error,
+            "reset_error": reset_error,
         },
+
         "front_end": {
             "potential_channel": cfg.potential_channel,
             "current_channel": cfg.current_channel,
@@ -240,14 +352,36 @@ def acquire_cv_scan(
             "calibrated": cfg.calibrated,
             "temperature": {
                 "value_c": temp_c_override,
-                "source": temp_source,
+                "source": temperature_source,
             },
         },
+
         "auxiliary_context": {
             "ph_measured_between_scans": ph_measured_between_scans,
-            "notes": "pH logged between scans to avoid electrode coupling per Phase-I methodology.",
+            "notes": (
+                "pH logged between scans to avoid electrode coupling "
+                "per Phase-I methodology."
+            ),
         },
     }
+
     with meta_json_path.open("x", encoding="utf-8") as f:
-        json.dump(metadata, f, indent=2)
+        json.dump(metadata, f, indent=2, allow_nan=False)
+
+    # The CSV and metadata are saved before an acquisition/reset error
+    # is raised, preserving partial data for diagnosis.
+    if acquisition_error is not None:
+        raise RuntimeError(
+            f"CV acquisition failed. Partial data saved to "
+            f"{raw_csv_path}. Error: {acquisition_error}"
+        )
+
+    if reset_error is not None:
+        raise RuntimeError(
+            f"CV data was acquired, but PV1 reset failed: {reset_error}. "
+            f"Data saved to {raw_csv_path}."
+        )
+
     return raw_csv_path, meta_json_path
+
+    
