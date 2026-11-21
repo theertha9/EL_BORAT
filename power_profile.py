@@ -19,10 +19,11 @@ def sample_power_monitor(monitor_reader=None) -> Tuple[float, float]:
             "No power monitor attached. Cannot collect real power measurements."
         )
 
-return monitor_reader()
+    return monitor_reader()
 
 
 def profile_state(
+        
     state_name: str,
     duration_s: float = 3.0,
     sample_interval_s: float = 0.05,
@@ -72,3 +73,4 @@ def run_four_state_power_profile(duration_per_state_s: float = 2.0, monitor_read
     summary_path = out_path.with_name(out_path.stem + "_summary.csv")
     summary.to_csv(summary_path)
     return out_path
+
