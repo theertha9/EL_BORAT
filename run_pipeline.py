@@ -57,7 +57,7 @@ def make_synthetic_cv_csv(repeat_idx: int, scan_rate_v_per_s: float = 0.05) -> P
             "v_start": CFG.v_start,
             "v_vertex": CFG.v_vertex,
             "v_end": CFG.v_end,
-            "scan_rate_v_per_s": CFG.scan_rate_v_per_s,
+            "scan_rate_v_per_s": scan_rate_v_per_s,,
             "step_v": CFG.step_v,
             "n_cycles": CFG.n_cycles,
             "calibrated": CFG.calibrated,
