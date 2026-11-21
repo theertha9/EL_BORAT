@@ -1,0 +1,36 @@
+# CV sweep and experiment inputs
+CFG.v_start:-0.20
+CFG.v_vertex:0.60
+CFG.v_end:-0.20
+CFG.scan_rate_v_per_s:0.05
+CFG.step_v:0.005
+CFG.n_cycles:1
+CFG.n_repeats:3
+
+# Analog input channel mapping; confirm against physical wiring
+CFG.potential_channel:A1
+CFG.current_channel:A2
+
+# Current sensing; replace placeholder conversion values with verified values
+CFG.current_mode:shunt
+CFG.shunt_ohm:1000.0
+CFG.tia_gain_v_per_a:100000.0
+CFG.current_sign:1.0
+
+# Analysis validation targets
+CFG.max_peak_shift_v:0.010
+CFG.max_peak_current_rel_change:0.05
+CFG.target_rsd_pct:5.0
+
+# Acquisition timing
+CFG.equilibration_s:2.0
+CFG.avg_window_s:0.08
+CFG.max_rate_error_pct:5.0
+
+# Set input ranges after checking the actual device/front-end specifications
+CFG.range_potential_v:None
+CFG.range_current_v:None
+
+# Calibration and electrode information
+CFG.calibrated:false
+CFG.electrode_area_cm2:None
