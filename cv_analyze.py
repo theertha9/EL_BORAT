@@ -1,9 +1,16 @@
 from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy.signal import butter, filtfilt, iirnotch, medfilt, savgol_filter
-from config import CFG, DATA_DIR
+
+from scipy.signal import (
+    butter, filtfilt, iirnotch, savgol_filter, find_peaks
+)
+from scipy.ndimage import median_filter
 
 
 def estimate_noise_metrics(current: np.ndarray, baseline_fraction: float = 0.15) -> dict:
@@ -14,14 +21,19 @@ def estimate_noise_metrics(current: np.ndarray, baseline_fraction: float = 0.15)
     n = len(current)
     n_base = max(5, int(n * baseline_fraction))
     baseline = current[:n_base]
-    noise_std = float(np.std(baseline, ddof=1))
-    noise_rms = float(np.sqrt(np.mean((baseline - np.mean(baseline)) ** 2)))
+    diff = np.diff(current)
+
+    if len(diff) == 0:
+        noise_std = np.nan
+    else:
+        median_diff = np.median(diff)
+        mad = np.median(np.abs(diff - median_diff))
+        noise_std = float(1.4826 * mad / np.sqrt(2))
     signal_peak = float(np.max(np.abs(current)))
     snr_linear = (signal_peak / noise_std) if noise_std > 0 else np.inf
     snr_db = float(20.0 * np.log10(snr_linear)) if np.isfinite(snr_linear) and snr_linear > 0 else np.inf
     return {
         "baseline_std": noise_std,
-        "baseline_rms": noise_rms,
         "signal_peak_abs": signal_peak,
         "snr_linear": snr_linear,
         "snr_db": snr_db,
