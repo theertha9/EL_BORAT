@@ -51,7 +51,8 @@ class HardwareConfig:
 
     # Calibration and electrode information
     calibrated: bool = False
-    electrode_area_cm2: Optional[float] = None
+    electrode_area=0.0707
+    electrode_area_cm2: Optional[float] = electrode_area
     target_rsd_pct: float = 5.0     # <= 5% repeatability across >=3 repeats
     def __post_init__(self) -> None:
 
