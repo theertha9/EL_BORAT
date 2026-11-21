@@ -1,0 +1,114 @@
+EL_BORAT CV PROGRAM - HARDWARE SPECIFICATIONS
+==============================================
+
+Purpose
+-------
+This document lists the hardware and setup needed to collect real cyclic
+voltammetry (CV) data with this program and generate its graph. The graphing
+step uses measured CSV data; it does not require the hardware to be connected
+if a valid acquisition CSV and its matching metadata file already exist.
+Simulation mode can also generate a graph without any hardware.
+
+Required for real CV acquisition
+--------------------------------
+
+1. Instrument and computer connection
+   - ExpEYES-17 / SEELab3 compatible device supported by the installed
+     `eyes17` Python package.
+   - USB connection, device power, and any required operating-system driver
+     or permissions.
+   - The device API must support `set_pv1(voltage)` and `get_voltage(channel)`.
+
+2. Electrochemical cell and analog front end
+   - A CV cell with working, reference, and counter electrodes.
+   - A suitable potentiostat / control-and-measurement circuit. The program
+     commands the sweep through PV1; PV1 must not be connected directly to a
+     cell unless the device/front-end design specifically supports that use.
+   - A current measurement output (for example, a shunt measurement or a
+     transimpedance amplifier (TIA)) connected to a supported analog input.
+   - A potential measurement output representing the cell potential, connected
+     to a supported analog input.
+   - Shared signal reference/ground and wiring appropriate to the
+     potentiostat and device. Check the front-end design to prevent ground
+     conflicts or input overvoltage.
+
+3. Configure and verify these values before acquisition
+   Values below are current software defaults, not confirmation of the
+   laboratory hardware's actual capabilities. Verify them against the device,
+   front end, cell, and experiment before use.
+
+   - Potential command output: PV1.
+   - Potential measurement input: A1 (`potential_channel`).
+   - Current measurement input: A2 (`current_channel`).
+   - Current measurement mode: shunt (`current_mode`).
+   - Shunt resistance: 1000 ohm (`shunt_ohm`) - PLACEHOLDER; replace with the
+     measured/verified value if using a shunt.
+   - TIA gain: 100000 V/A (`tia_gain_v_per_a`) - PLACEHOLDER; set to the
+     verified feedback gain if using a TIA.
+   - Current polarity: +1 (`current_sign`); set to -1 only if the measured
+     front end inverts the current signal.
+   - Analog input ranges: `range_potential_v` and `range_current_v` are unset.
+     Verify the supported ranges and set them appropriately. The setup audit
+     specifically asks to verify whether inputs are in the +/-16 V or
+     +/-3.3 V range.
+   - Calibration flag: `calibrated` is false by default. Calibrate/verify the
+     front end and mark it calibrated only after calibration has actually
+     been completed.
+   - Electrode area: `electrode_area_cm2` is unset. It is optional; when set
+     to the verified area in cm^2, the graph uses current density in
+     mA cm^-2. When unset, it plots current in microamps.
+
+4. Default sweep and acquisition settings
+   - Start potential: -0.20 V.
+   - Forward vertex potential: +0.60 V.
+   - End potential: -0.20 V (return to start to complete the cycle).
+   - Scan rate: 0.05 V/s (allowed by config: 0.02 to 0.20 V/s).
+   - Potential step: 0.005 V.
+   - Number of cycles: 1.
+   - Equilibration time: 2.0 s.
+   - Measurement averaging window: 0.08 s, i.e. four 50 Hz mains periods.
+     The software requires this window to be a whole multiple of 0.020 s and
+     no longer than the shortest potential-step interval.
+   - Maximum allowed scan-rate error: 5%.
+   These settings are in config.py and should only be changed to match the
+   intended experiment and verified instrument setup.
+
+Optional hardware / inputs
+--------------------------
+- Temperature sensor: not required by the CV acquisition or plot. The current
+  `read_temperature_c` function is a placeholder; temperature can currently
+  be supplied manually or recorded as unavailable.
+- pH measurement: not required for acquisition or graph generation. The
+  acquisition function accepts an optional pH value to record between scans.
+- Power monitor: only required for real power profiling (for example, a
+  supported INA219 or ESP32-based monitor connected through a reader
+  integration). It is not required for CV measurement or graph generation.
+
+Generating the graph
+--------------------
+- Real-data path: acquire a complete scan to produce a CSV and matching
+  `.meta.json` file. Analysis validates the metadata, commanded sweep, and
+  measurement columns before plotting.
+- Offline path: run the program with `--simulate`; this creates synthetic
+  data and a graph without connecting hardware.
+- Required CSV fields for analysis: `v_cmd_v`, `v_meas_v`, `current_ua`, and
+  `t_rel_s`.
+- The plot follows the measured potential in acquisition order, with forward
+  and reverse sweep branches forming the CV loop. The raw current and filtered
+  current are display traces; filtering changes plotted/analysis traces, not
+  the saved raw measurement values.
+- For a physically meaningful graph, verify potential calibration, current
+  conversion (shunt resistance or TIA gain), current polarity, input ranges,
+  and electrode area (if plotting current density). Software defaults marked
+  as placeholders must not be treated as measured hardware specifications.
+
+Safety and validation
+---------------------
+- Check the device and front-end voltage/current limits before connecting a
+  cell or commanding a sweep.
+- Confirm electrode wiring, reference-electrode compatibility, signal
+  grounding, and input ranges with the instrument/front-end documentation.
+- Run the setup audit and confirm that the device is connected and that the
+  configured A1/A2 signals and PV1 output match the actual wiring.
+- Confirm calibration and current conversion with known test conditions
+  before using acquired values as experimental results.
