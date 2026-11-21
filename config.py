@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Optional
 
@@ -10,6 +10,7 @@ BASE_DIR = Path(__file__).resolve().parent
 
 _data_dir_env = os.environ.get("DATA_DIR")
 DATA_DIR = Path(_data_dir_env).expanduser() if _data_dir_env else BASE_DIR / "data"
+CONFIG_FILE = BASE_DIR / "hardware_config.txt"
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,7 @@ class HardwareConfig:
     scan_rate_v_per_s: float = 0.05 # 50 mV/s (proposal range: 0.02 to 0.20 V/s)
     step_v: float = 0.005           # 5 mV per step (adjust to balance resolution vs speed)
     n_cycles: int = 1
+    n_repeats: int = 3
 
     # Channel mapping (VERIFY during lab audit!)
     # Example: A1 reads working/cell potential or TIA output; A2 reads current-sense node
@@ -58,6 +60,9 @@ class HardwareConfig:
         # Validate cycle count
         if isinstance(self.n_cycles, bool) or not isinstance(self.n_cycles, int) or self.n_cycles <= 0:
             raise ValueError("n_cycles must be a positive integer")
+
+        if isinstance(self.n_repeats, bool) or not isinstance(self.n_repeats, int) or self.n_repeats <= 0:
+            raise ValueError("n_repeats must be a positive integer")
 
         # Validate potential limits
         potentials = (self.v_start, self.v_vertex, self.v_end)
@@ -156,7 +161,77 @@ class HardwareConfig:
             ):
                 raise ValueError("electrode_area_cm2 must be positive")
 
-CFG = HardwareConfig()
+def load_hardware_config(path: Path = CONFIG_FILE) -> HardwareConfig:
+    """Load every HardwareConfig value from a name:value text file."""
+    config_fields = {item.name: item.default for item in fields(HardwareConfig)}
+    values = {}
+
+    with path.open("r", encoding="utf-8") as config_file:
+        for line_number, line in enumerate(config_file, start=1):
+            content = line.partition("#")[0].strip()
+            if not content:
+                continue
+
+            if ":" not in content:
+                raise ValueError(
+                    f"{path}:{line_number}: expected 'name:value'."
+                )
+
+            name, raw_value = (part.strip() for part in content.split(":", 1))
+            if name not in config_fields:
+                raise ValueError(
+                    f"{path}:{line_number}: unknown configuration variable "
+                    f"'{name}'."
+                )
+            if name in values:
+                raise ValueError(
+                    f"{path}:{line_number}: duplicate configuration variable "
+                    f"'{name}'."
+                )
+            if not raw_value:
+                raise ValueError(
+                    f"{path}:{line_number}: value for '{name}' cannot be empty."
+                )
+
+            default = config_fields[name]
+            try:
+                if isinstance(default, bool):
+                    normalized = raw_value.lower()
+                    if normalized not in {"true", "false"}:
+                        raise ValueError("expected true or false")
+                    values[name] = normalized == "true"
+                elif isinstance(default, int):
+                    values[name] = int(raw_value)
+                elif isinstance(default, float):
+                    values[name] = float(raw_value)
+                elif default is None:
+                    values[name] = (
+                        None if raw_value.lower() == "none"
+                        else float(raw_value)
+                    )
+                else:
+                    values[name] = raw_value
+            except ValueError as exc:
+                raise ValueError(
+                    f"{path}:{line_number}: invalid value for '{name}': "
+                    f"{raw_value!r}."
+                ) from exc
+
+    missing = sorted(set(config_fields) - set(values))
+    if missing:
+        raise ValueError(
+            f"{path}: missing configuration variables: {', '.join(missing)}."
+        )
+
+    return HardwareConfig(**values)
+
+
+CFG = load_hardware_config()
+
+
+
+
+
 
 
 
