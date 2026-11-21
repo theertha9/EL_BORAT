@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from config import DATA_DIR
+from typing import Tuple
 
 POWER_STATES = ("idle", "sensing", "scan", "transfer")
 
