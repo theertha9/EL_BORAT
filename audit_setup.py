@@ -16,10 +16,16 @@ def run_audit() -> dict:
         "notes": [],
     }
 
-    p = eyes.open()
+    try:
+        p = eyes.open()
+    except Exception as exc:
+        report["notes"].append(f"Device connection failed: {exc}")
+        return report
+    
     if p is None or not getattr(p, "connected", False):
         report["notes"].append(
-            "ExpEYES/SEELab3 not detected. Check USB cable, udev/driver permissions, or device power."
+            "ExpEYES/SEELab3 not detected. Check USB cable, "
+            "udev/driver permissions, or device power."
         )
         return report
 
@@ -27,7 +33,11 @@ def run_audit() -> dict:
     report["device_repr"] = repr(p)
 
     # Set PV1 to 0 V and sample baseline channels
-    p.set_pv1(0.0)
+    try:
+        p.set_pv1(0.0)
+    except Exception as exc:
+        report["notes"].append(f"Failed to set PV1 to 0 V: {exc}")
+    
     for ch in ("A1", "A2", "A3"):
         try:
             report["baseline_voltages"][ch] = float(p.get_voltage(ch))
