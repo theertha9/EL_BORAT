@@ -1,0 +1,36 @@
+# CV sweep protocol
+v_start:-0.20
+v_vertex:0.60
+v_end:-0.20
+scan_rate_v_per_s:0.05
+step_v:0.005
+n_cycles:1
+n_repeats:3
+
+# Analog input channel mapping; confirm against physical wiring
+potential_channel:A1
+current_channel:A2
+
+# Current sensing; replace placeholder conversion values with verified values
+current_mode:shunt
+shunt_ohm:1000.0
+tia_gain_v_per_a:100000.0
+current_sign:1.0
+
+# Analysis validation targets
+max_peak_shift_v:0.010
+max_peak_current_rel_change:0.05
+target_rsd_pct:5.0
+
+# Acquisition timing
+equilibration_s:2.0
+avg_window_s:0.08
+max_rate_error_pct:5.0
+
+# Set input ranges after checking the actual device/front-end specifications
+range_potential_v:None
+range_current_v:None
+
+# Calibration/electrode information
+calibrated:false
+electrode_area_cm2:None
