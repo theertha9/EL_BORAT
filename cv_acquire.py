@@ -42,7 +42,7 @@ def build_sweep_potentials(
             cycles.append(link)
     
         cycles.append(single_cycle[1:])
-    
+
     return np.concatenate(cycles)
 
 
