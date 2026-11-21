@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import time
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
@@ -77,6 +78,110 @@ def read_temperature_c(p=None, fallback_c: float | None = None) -> float | None:
     return fallback_c
 
 
+def _write_cv_report(
+    report_path: Path,
+    metadata: dict,
+    rows: list[dict],
+) -> None:
+    """Write experiment settings and per-step readings to a text report."""
+    with report_path.open("x", encoding="utf-8") as report:
+        report.write("CYCLIC VOLTAMMETRY EXPERIMENT REPORT\n")
+        report.write("=" * 38 + "\n\n")
+        report.write(f"Created (UTC): {metadata['created_utc']}\n")
+        report.write(f"Run label: {metadata['run_label']}\n")
+        report.write(f"Repeat index: {metadata['repeat_idx']}\n")
+        report.write(f"Raw CSV: {metadata['raw_csv']}\n")
+        report.write(f"Report status: {'complete' if metadata['acquisition']['complete'] else 'incomplete'}\n\n")
+
+        report.write("EXPERIMENT AND HARDWARE SPECIFICATIONS\n")
+        report.write("-------------------------------------\n")
+        for name, value in metadata["program_config"].items():
+            report.write(f"CFG.{name}: {value}\n")
+        report.write("\n")
+
+        for section_name in (
+            "scan_params",
+            "acquisition",
+            "front_end",
+            "auxiliary_context",
+        ):
+            report.write(f"{section_name.upper().replace('_', ' ')}\n")
+            report.write("-" * len(section_name) + "\n")
+            for name, value in metadata[section_name].items():
+                report.write(f"{name}: {value}\n")
+            report.write("\n")
+
+        setup_audit = metadata.get("setup_audit")
+        if setup_audit is not None:
+            report.write("PRE-SCAN SETUP AUDIT READINGS\n")
+            report.write("-----------------------------\n")
+            for name, value in setup_audit.items():
+                report.write(f"{name}: {value}\n")
+            report.write("\n")
+
+        report.write("READINGS BEFORE AND AFTER EACH POTENTIAL COMMAND\n")
+        report.write("-----------------------------------------------\n")
+        report.write(
+            "The first pre-command values are measured before the initial PV1 "
+            "setpoint. Each later pre-command value is the preceding step's "
+            "averaged reading (no additional samples or sweep delays are added).\n"
+            "Post-command values are averages over the configured averaging "
+            "window. Individual readings from each window follow each step.\n\n"
+        )
+
+        if not rows:
+            report.write("No potential-step readings were collected.\n")
+
+        for row in rows:
+            report.write(
+                f"Step {row['sample_idx']} | t={row['t_rel_s']:.6f} s | "
+                f"commanded PV1={row['v_cmd_v']:.9g} V\n"
+            )
+            report.write(
+                f"  Before: potential={row['v_pre_v']:.9g} V, "
+                f"current-sense={row['v_curr_sense_pre_v']:.9g} V\n"
+            )
+            report.write(
+                f"  After (averaged): potential={row['v_meas_v']:.9g} V, "
+                f"current-sense={row['v_curr_sense_v']:.9g} V, "
+                f"current={row['current_a']:.9g} A "
+                f"({row['current_ua']:.9g} uA), "
+                f"temperature={row['temp_c']}\n"
+            )
+            report.write(
+                f"  Step elapsed: {row['step_elapsed_s']:.6f} s\n"
+            )
+            report.write("  Individual readings during averaging window:\n")
+
+            samples = json.loads(row["sample_readings_json"])
+            if not samples:
+                report.write("    No individual readings recorded.\n")
+            else:
+                report.write(
+                    "    time_rel_s | potential_v | current_sense_v | "
+                    "current_a | current_ua\n"
+                )
+                for sample in samples:
+                    report.write(
+                        f"    {sample['t_rel_s']:.6f} | "
+                        f"{sample['potential_v']:.9g} | "
+                        f"{sample['current_sense_v']:.9g} | "
+                        f"{sample['current_a']:.9g} | "
+                        f"{sample['current_ua']:.9g}\n"
+                    )
+            report.write("\n")
+
+        report.write("READINGS AFTER THE SCAN / PV1 RESET\n")
+        report.write("----------------------------------\n")
+        for name, value in metadata["acquisition"]["post_reset_readings"].items():
+            report.write(f"{name}: {value}\n")
+
+        for key in ("acquisition_error", "reset_error"):
+            error = metadata["acquisition"].get(key)
+            if error is not None:
+                report.write(f"{key}: {error}\n")
+
+
 
 def acquire_cv_scan(
     p,
@@ -84,6 +189,7 @@ def acquire_cv_scan(
     repeat_idx: int = 1,
     ph_measured_between_scans: float | None = None,
     temp_c_override: float | None = None,
+    setup_audit: dict | None = None,
     cfg=CFG,
 ) -> tuple[Path, Path]:
     """
@@ -165,6 +271,7 @@ def acquire_cv_scan(
     acquisition_error = None
     reset_error = None
     complete = False
+    post_reset_readings = {}
 
     start_utc = datetime.now(timezone.utc).isoformat()
     t0 = time.perf_counter()
@@ -175,6 +282,11 @@ def acquire_cv_scan(
     )
 
     try:
+        # Record the baseline immediately before applying the first sweep
+        # potential; later pre-command values reuse the preceding step average.
+        previous_potential = float(p.get_voltage(cfg.potential_channel))
+        previous_current_sense = float(p.get_voltage(cfg.current_channel))
+
         # Move to initial potential and allow the electrode to equilibrate.
         p.set_pv1(float(potentials[0]))
         time.sleep(cfg.equilibration_s)
@@ -196,6 +308,8 @@ def acquire_cv_scan(
             if idx > 0:
                 p.set_pv1(float(v_cmd))
 
+            pre_potential = previous_potential
+            pre_current_sense = previous_current_sense
             command_time = time.perf_counter()
             command_times.append(command_time)
 
@@ -204,18 +318,34 @@ def acquire_cv_scan(
 
             potential_samples = []
             current_samples = []
+            sample_readings = []
 
             # Collect readings throughout the averaging window.
             while (
                 time.perf_counter() - window_start
                 < cfg.avg_window_s
             ):
-                potential_samples.append(
-                    float(p.get_voltage(cfg.potential_channel))
+                potential_sample = float(
+                    p.get_voltage(cfg.potential_channel)
                 )
-
-                current_samples.append(
-                    float(p.get_voltage(cfg.current_channel))
+                current_sample = float(
+                    p.get_voltage(cfg.current_channel)
+                )
+                sample_time = time.perf_counter()
+                sample_current_a = voltage_to_current_a(
+                    current_sample,
+                    cfg,
+                )
+                potential_samples.append(potential_sample)
+                current_samples.append(current_sample)
+                sample_readings.append(
+                    {
+                        "t_rel_s": sample_time - t0,
+                        "potential_v": potential_sample,
+                        "current_sense_v": current_sample,
+                        "current_a": sample_current_a,
+                        "current_ua": sample_current_a * 1e6,
+                    }
                 )
 
             window_end = time.perf_counter()
@@ -246,14 +376,19 @@ def acquire_cv_scan(
                     "sample_idx": idx,
                     "t_rel_s": t_rel,
                     "v_cmd_v": float(v_cmd),
+                    "v_pre_v": pre_potential,
+                    "v_curr_sense_pre_v": pre_current_sense,
                     "v_meas_v": v_meas,
                     "v_curr_sense_v": v_curr_node,
                     "current_a": i_a,
                     "current_ua": i_a * 1e6,
                     "temp_c": temp_c,
                     "step_elapsed_s": window_end - step_start,
+                    "sample_readings_json": json.dumps(sample_readings),
                 }
             )
+            previous_potential = v_meas
+            previous_current_sense = v_curr_node
 
         complete = True
 
@@ -266,6 +401,17 @@ def acquire_cv_scan(
             p.set_pv1(0.0)
         except Exception as exc:
             reset_error = repr(exc)
+        else:
+            for name, channel in (
+                ("potential_v", cfg.potential_channel),
+                ("current_sense_v", cfg.current_channel),
+            ):
+                try:
+                    post_reset_readings[name] = float(
+                        p.get_voltage(channel)
+                    )
+                except Exception as exc:
+                    post_reset_readings[name] = f"Read error: {exc!r}"
 
     # Calculate achieved scan rate from actual commanded path distance
     # and actual time between the first and last commands.
@@ -308,6 +454,9 @@ def acquire_cv_scan(
         "current_ua",
         "temp_c",
         "step_elapsed_s",
+        "v_pre_v",
+        "v_curr_sense_pre_v",
+        "sample_readings_json",
     ]
 
     df = pd.DataFrame(rows, columns=csv_columns)
@@ -344,6 +493,7 @@ def acquire_cv_scan(
             "complete": complete,
             "acquisition_error": acquisition_error,
             "reset_error": reset_error,
+            "post_reset_readings": post_reset_readings,
         },
 
         "front_end": {
@@ -369,10 +519,17 @@ def acquire_cv_scan(
                 "per Phase-I methodology."
             ),
         },
+        "setup_audit": setup_audit,
+        "program_config": asdict(cfg),
     }
+
+    report_path = raw_csv_path.with_suffix(".report.txt")
+    metadata["report_file"] = report_path.name
 
     with meta_json_path.open("x", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, allow_nan=False)
+
+    _write_cv_report(report_path, metadata, rows)
 
     # The CSV and metadata are saved before an acquisition/reset error
     # is raised, preserving partial data for diagnosis.
@@ -389,6 +546,11 @@ def acquire_cv_scan(
         )
 
     return raw_csv_path, meta_json_path
+
+    
+
+    
+
 
     
 
