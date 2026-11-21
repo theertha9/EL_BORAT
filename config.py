@@ -10,7 +10,7 @@ BASE_DIR = Path(__file__).resolve().parent
 
 _data_dir_env = os.environ.get("DATA_DIR")
 DATA_DIR = Path(_data_dir_env).expanduser() if _data_dir_env else BASE_DIR / "data"
-CONFIG_FILE = BASE_DIR / "hardware_config.txt"
+CONFIG_FILE = BASE_DIR / "sample_dataset.txt"
 
 
 @dataclass(frozen=True)
@@ -178,12 +178,13 @@ def load_hardware_config(path: Path = CONFIG_FILE) -> HardwareConfig:
                 )
 
             name, raw_value = (part.strip() for part in content.split(":", 1))
-            if name not in config_fields:
+            field_name = name[4:] if name.startswith("CFG.") else name
+            if field_name not in config_fields:
                 raise ValueError(
                     f"{path}:{line_number}: unknown configuration variable "
                     f"'{name}'."
                 )
-            if name in values:
+            if field_name in values:
                 raise ValueError(
                     f"{path}:{line_number}: duplicate configuration variable "
                     f"'{name}'."
@@ -193,24 +194,24 @@ def load_hardware_config(path: Path = CONFIG_FILE) -> HardwareConfig:
                     f"{path}:{line_number}: value for '{name}' cannot be empty."
                 )
 
-            default = config_fields[name]
+            default = config_fields[field_name]
             try:
                 if isinstance(default, bool):
                     normalized = raw_value.lower()
                     if normalized not in {"true", "false"}:
                         raise ValueError("expected true or false")
-                    values[name] = normalized == "true"
+                    values[field_name] = normalized == "true"
                 elif isinstance(default, int):
-                    values[name] = int(raw_value)
+                    values[field_name] = int(raw_value)
                 elif isinstance(default, float):
-                    values[name] = float(raw_value)
+                    values[field_name] = float(raw_value)
                 elif default is None:
-                    values[name] = (
+                    values[field_name] = (
                         None if raw_value.lower() == "none"
                         else float(raw_value)
                     )
                 else:
-                    values[name] = raw_value
+                    values[field_name] = raw_value
             except ValueError as exc:
                 raise ValueError(
                     f"{path}:{line_number}: invalid value for '{name}': "
@@ -227,22 +228,6 @@ def load_hardware_config(path: Path = CONFIG_FILE) -> HardwareConfig:
 
 
 CFG = load_hardware_config()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
