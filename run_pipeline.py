@@ -2,12 +2,10 @@ import argparse #xyz
 from pathlib import Path
 import numpy as np
 import pandas as pd
-from eyes17 import eyes
 from config import CFG, DATA_DIR
-from audit_setup import run_audit
-from cv_acquire import acquire_cv_scan
 from cv_analyze import analyze_single_csv, compute_repeat_rsd
 from power_profile import run_four_state_power_profile
+from typing import List
 
 
 def make_synthetic_cv_csv(repeat_idx: int, scan_rate_v_per_s: float = 0.05) -> Path:
@@ -28,7 +26,8 @@ def make_synthetic_cv_csv(repeat_idx: int, scan_rate_v_per_s: float = 0.05) -> P
     total_time = abs(0.6 - (-0.2)) * 2 / scan_rate_v_per_s
     t = np.linspace(0.0, total_time, len(v))
 
-    out_csv = DATA_DIR / f"cv_raw_sim_rep{repeat_idx}.csv"
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    out_csv = DATA_DIR / f"cv_raw_sim_{run_id}_rep{repeat_idx}.csv"
     pd.DataFrame(
         {
             "sample_idx": np.arange(len(v)),
@@ -50,14 +49,19 @@ def main() -> None:
     parser.add_argument("--simulate", action="store_true", help="Run without physical ExpEYES hardware")
     parser.add_argument("--repeats", type=int, default=3, help="Number of repeat scans (>=3 recommended)")
     args = parser.parse_args()
+    if args.repeats < 1:
+        parser.error("--repeats must be at least 1.")
 
-    csv_files: list[Path] = []
+    csv_files: List[Path] = []
 
     if args.simulate:
         print("Running in --simulate mode (synthetic data)...")
         for r in range(1, args.repeats + 1):
             csv_files.append(make_synthetic_cv_csv(r, CFG.scan_rate_v_per_s))
     else:
+        from eyes17 import eyes
+        from audit_setup import run_audit
+        from cv_acquire import acquire_cv_scan
         audit = run_audit()
         print("Audit summary:", audit["connected"], audit["notes"])
         if not audit["connected"]:
@@ -83,8 +87,14 @@ def main() -> None:
                 f"dI={fres['max_peak_current_chg_pct']:.2f}%, within_targets={fres['within_targets']}"
             )
 
-    pwr_csv = run_four_state_power_profile(duration_per_state_s=0.5 if args.simulate else 2.0)
-    print(f"\nPower profile saved to: {pwr_csv.name}")
+if not args.simulate:
+    try:
+        pwr_csv = run_four_state_power_profile(duration_per_state_s=2.0)
+        print(f"\nPower profile saved to: {pwr_csv.name}")
+    except RuntimeError as exc:
+        print(f"\nPower profiling skipped: {exc}")
+else:
+    print("\nPower profiling skipped in simulation mode.")
 
 
 if __name__ == "__main__":
