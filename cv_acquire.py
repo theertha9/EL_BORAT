@@ -1,3 +1,4 @@
+from __future__ import annotations
 import json
 import time
 from datetime import datetime, timezone
@@ -66,6 +67,15 @@ def read_temperature_c(p=None, fallback_c: float | None = None) -> float | None:
     Hook for DS18B20 (1-Wire), thermistor on analog channel, or microcontroller bridge.
     Replace with concrete sensor read once audited on the lab hardware.
     """
+    temp_source = (
+        "manual"
+        if temp_c_override is not None
+        else "stub"
+    )
+    "temperature": {
+        "value_c": temp_c_override,
+        "source": temp_source,
+    },
     return fallback_c
 
 
@@ -96,6 +106,10 @@ def acquire_cv_scan(
         cfg.v_start, cfg.v_vertex, cfg.v_end, cfg.step_v, cfg.n_cycles
     )
     dt_step = cfg.step_v / cfg.scan_rate_v_per_s
+    if cfg.avg_window_s > dt_step:
+        raise ValueError(
+            "Averaging window exceeds the available step interval."
+        )
 
     rows = []
     t0 = time.perf_counter()
@@ -204,6 +218,16 @@ def acquire_cv_scan(
             "n_cycles": cfg.n_cycles,
             "calibrated": cfg.calibrated,
         },
+        "acquisition": {
+            "equilibration_s": cfg.equilibration_s,
+            "avg_window_s": cfg.avg_window_s,
+            "requested_scan_rate_v_per_s": cfg.scan_rate_v_per_s,
+            "achieved_scan_rate_v_per_s": achieved_rate,
+            "rate_error_pct": rate_error_pct,
+            "max_rate_error_pct": cfg.max_rate_error_pct,
+            "complete": complete,
+            "error": error_message,
+        },
         "front_end": {
             "potential_channel": cfg.potential_channel,
             "current_channel": cfg.current_channel,
@@ -211,6 +235,13 @@ def acquire_cv_scan(
             "shunt_ohm": cfg.shunt_ohm,
             "tia_gain_v_per_a": cfg.tia_gain_v_per_a,
             "current_sign": cfg.current_sign,
+            "potential_range_v": cfg.range_potential_v,
+            "current_range_v": cfg.range_current_v,
+            "calibrated": cfg.calibrated,
+            "temperature": {
+                "value_c": temp_c_override,
+                "source": temp_source,
+            },
         },
         "auxiliary_context": {
             "ph_measured_between_scans": ph_measured_between_scans,
