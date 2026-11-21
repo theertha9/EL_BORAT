@@ -25,7 +25,11 @@ def make_synthetic_cv_csv(repeat_idx: int, scan_rate_v_per_s: float = 0.05) -> P
     noise = rng.normal(0.0, 0.35, size=len(v))
     i_ua = i_anodic + i_cathodic + noise
 
-    total_time = abs(0.6 - (-0.2)) * 2 / scan_rate_v_per_s
+    total_sweep_distance = (
+        abs(CFG.v_vertex - CFG.v_start)
+        + abs(CFG.v_end - CFG.v_vertex)
+    )
+    total_time = total_sweep_distance / scan_rate_v_per_s
     t = np.linspace(0.0, total_time, len(v))
 
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
