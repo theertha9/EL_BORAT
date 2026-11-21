@@ -1,0 +1,11 @@
+# Core numerical and plotting dependencies
+# Version ranges allow pip to select the newest release compatible with
+# the active Python version (including older Python 3.8 environments).
+numpy>=1.23,<3
+pandas>=1.5,<4
+scipy>=1.10,<2
+matplotlib>=3.7,<4
+
+# ExpEYES-17 / SEELab3 communication library.
+# Distribution name: eyes17lib | Python import: from eyes17 import eyes
+eyes17lib==2.0.5
