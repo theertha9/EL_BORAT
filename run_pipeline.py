@@ -17,13 +17,23 @@ def make_synthetic_cv_csv(repeat_idx: int, scan_rate_v_per_s: float = 0.05) -> P
     v_rev = np.linspace(CFG.v_vertex, CFG.v_end, int(round(abs(CFG.v_end - CFG.v_vertex) / CFG.step_v)) + 1)[1:]
     v = np.concatenate([v_fwd, v_rev])
 
-    # Simulated anodic peak near +0.25 V and cathodic peak near +0.16 V
+    # Simulated branch currents: oxidation on the forward sweep and
+    # reduction on the reverse sweep. This produces a closed CV loop.
     rng = np.random.default_rng(seed=100 + repeat_idx)
     scale = np.sqrt(scan_rate_v_per_s / 0.05)
-    i_anodic = 17.0 * scale * np.exp(-((v - 0.25) / 0.065) ** 2)
-    i_cathodic = -16.5 * scale * np.exp(-((v - 0.16) / 0.065) ** 2)
     noise = rng.normal(0.0, 0.35, size=len(v))
-    i_ua = i_anodic + i_cathodic + noise
+
+    forward_mask = np.arange(len(v)) < len(v_fwd)
+    i_ua = np.zeros(len(v), dtype=float)
+    i_ua[forward_mask] = (
+        17.0 * scale
+        * np.exp(-((v[forward_mask] - 0.25) / 0.065) ** 2)
+    )
+    i_ua[~forward_mask] = (
+        -16.5 * scale
+        * np.exp(-((v[~forward_mask] - 0.16) / 0.065) ** 2)
+    )
+    i_ua += noise
 
     total_sweep_distance = (
         abs(CFG.v_vertex - CFG.v_start)
@@ -57,7 +67,7 @@ def make_synthetic_cv_csv(repeat_idx: int, scan_rate_v_per_s: float = 0.05) -> P
             "v_start": CFG.v_start,
             "v_vertex": CFG.v_vertex,
             "v_end": CFG.v_end,
-            "scan_rate_v_per_s": scan_rate_v_per_s,,
+            "scan_rate_v_per_s": scan_rate_v_per_s,
             "step_v": CFG.step_v,
             "n_cycles": CFG.n_cycles,
             "calibrated": CFG.calibrated,
@@ -130,3 +140,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
