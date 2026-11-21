@@ -76,6 +76,11 @@ def acquire_cv_scan(
     ph_measured_between_scans: float | None = None,
     temp_c_override: float | None = None,
     cfg=CFG,
+    if not cfg.calibrated:
+        print(
+            "WARNING: FRONT END IS NOT CALIBRATED. "
+            "Current measurements are not validated."
+    )
 ) -> tuple[Path, Path]:
     """
     Execute a cyclic voltammetry sweep using PV1 and log raw data to CSV + JSON metadata.
@@ -98,19 +103,48 @@ def acquire_cv_scan(
 
     # Move smoothly to initial potential
     p.set_pv1(float(potentials[0]))
-    time.sleep(0.05)
-
+    time.sleep(cfg.equilibration_s)
+    sweep_t0 = time.perf_counter()
     for idx, v_cmd in enumerate(potentials):
-        step_start = time.perf_counter()
+        deadline = sweep_t0 + idx * dt_step
+    
         p.set_pv1(float(v_cmd))
-        if dt_step > 0:
-            time.sleep(dt_step)
+    
+        remaining = deadline - time.perf_counter()
+        if remaining > 0:
+            time.sleep(remaining)
 
         t_rel = time.perf_counter() - t0
-        v_meas = float(p.get_voltage(cfg.potential_channel))
-        v_curr_node = float(p.get_voltage(cfg.current_channel))
+        window_start = time.perf_counter()
+        potential_samples = []
+        current_samples = []
+        
+        while time.perf_counter() - window_start < cfg.avg_window_s:
+            potential_samples.append(
+                float(p.get_voltage(cfg.potential_channel))
+            )
+            current_samples.append(
+                float(p.get_voltage(cfg.current_channel))
+            )
+        
+        v_meas = float(np.mean(potential_samples))
+        v_curr_node = float(np.mean(current_samples))
         i_a = voltage_to_current_a(v_curr_node, cfg)
         temp_c = read_temperature_c(p, fallback_c=temp_c_override)
+        period_s = 0.020
+        elapsed = rows[-1]["t_rel_s"] - rows[0]["t_rel_s"]
+
+    if elapsed > 0:
+        achieved_rate = (
+            abs(rows[-1]["v_cmd_v"] - rows[0]["v_cmd_v"]) / elapsed
+        )
+    else:
+        achieved_rate = np.nan
+    
+    rate_error_pct = (
+        abs(achieved_rate - cfg.scan_rate_v_per_s)
+        / cfg.scan_rate_v_per_s * 100
+    )
 
         rows.append(
             {
@@ -125,12 +159,36 @@ def acquire_cv_scan(
                 "step_elapsed_s": time.perf_counter() - step_start,
             }
         )
+        
 
     # Return PV1 safely to 0 V after sweep
-    p.set_pv1(0.0)
+    rows = []
+    error_message = None
+    complete = False
+    
+    try:
+        # Equilibration and acquisition loop here
+        complete = True
+    
+    except Exception as exc:
+        error_message = repr(exc)
+        raise
+    
+    finally:
+        try:
+            p.set_pv1(0.0)
+        except Exception as reset_exc:
+            error_message = (
+                f"{error_message}; PV1 reset failed: {reset_exc}"
+                if error_message
+                else f"PV1 reset failed: {reset_exc}"
+            )
+
+    # Save partial data and metadata here
 
     df = pd.DataFrame(rows)
-    df.to_csv(raw_csv_path, index=False)
+    with raw_csv_path.open("x", encoding="utf-8", newline="") as f:
+        df.to_csv(f, index=False)
 
     metadata = {
         "created_utc": start_utc,
@@ -144,6 +202,7 @@ def acquire_cv_scan(
             "scan_rate_v_per_s": cfg.scan_rate_v_per_s,
             "step_v": cfg.step_v,
             "n_cycles": cfg.n_cycles,
+            "calibrated": cfg.calibrated,
         },
         "front_end": {
             "potential_channel": cfg.potential_channel,
@@ -158,5 +217,6 @@ def acquire_cv_scan(
             "notes": "pH logged between scans to avoid electrode coupling per Phase-I methodology.",
         },
     }
-    meta_json_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    with meta_json_path.open("x", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
     return raw_csv_path, meta_json_path
