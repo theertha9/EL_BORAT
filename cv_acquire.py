@@ -17,6 +17,11 @@ def build_sweep_potentials(
 ) -> np.ndarray:
     """Build forward (v_start -> v_vertex) and reverse (v_vertex -> v_end) potential steps."""
     step = abs(step_v)
+    if n_cycles < 1:
+        raise ValueError("n_cycles must be at least 1.")
+    
+    if not np.all(np.isfinite([v_start, v_vertex, v_end, step_v])):
+        raise ValueError("Potential values and step_v must be finite.")
     if step <= 0:
         raise ValueError("step_v must be positive.")
 
@@ -81,6 +86,10 @@ def acquire_cv_scan(
     temp_c_override: float | None = None,
     cfg=CFG,
 ) -> tuple[Path, Path]:
+     """
+    Execute a cyclic voltammetry sweep using PV1 and log raw data to CSV + JSON metadata.
+    Never overwrites or mutates raw data after writing.
+    """
     
     if not cfg.calibrated:
         print(
@@ -88,10 +97,7 @@ def acquire_cv_scan(
             "Current measurements are not validated."
         )
 
-    """
-    Execute a cyclic voltammetry sweep using PV1 and log raw data to CSV + JSON metadata.
-    Never overwrites or mutates raw data after writing.
-    """
+   
     
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
