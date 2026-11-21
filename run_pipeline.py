@@ -1,4 +1,6 @@
 import argparse #xyz
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -11,8 +13,8 @@ from typing import List
 def make_synthetic_cv_csv(repeat_idx: int, scan_rate_v_per_s: float = 0.05) -> Path:
     """Create a synthetic reversible-like CV trace for offline testing before hardware wiring."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    v_fwd = np.linspace(-0.2, 0.6, 160)
-    v_rev = np.linspace(0.6, -0.2, 160)[1:]
+    v_fwd = np.linspace(CFG.v_start, CFG.v_vertex, int(round(abs(CFG.v_vertex - CFG.v_start) / CFG.step_v)) + 1)
+    v_rev = np.linspace(CFG.v_vertex, CFG.v_end, int(round(abs(CFG.v_end - CFG.v_vertex) / CFG.step_v)) + 1)[1:]
     v = np.concatenate([v_fwd, v_rev])
 
     # Simulated anodic peak near +0.25 V and cathodic peak near +0.16 V
@@ -41,6 +43,31 @@ def make_synthetic_cv_csv(repeat_idx: int, scan_rate_v_per_s: float = 0.05) -> P
             "step_elapsed_s": np.gradient(t),
         }
     ).to_csv(out_csv, index=False)
+
+    metadata = {
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "run_label": "synthetic",
+        "repeat_idx": repeat_idx,
+        "raw_csv": out_csv.name,
+        "scan_params": {
+            "v_start": CFG.v_start,
+            "v_vertex": CFG.v_vertex,
+            "v_end": CFG.v_end,
+            "scan_rate_v_per_s": CFG.scan_rate_v_per_s,
+            "step_v": CFG.step_v,
+            "n_cycles": CFG.n_cycles,
+            "calibrated": CFG.calibrated,
+        },
+        "acquisition": {
+            "complete": True,
+            "n_samples_saved": len(v),
+            "achieved_scan_rate_v_per_s": scan_rate_v_per_s,
+            "requested_scan_rate_v_per_s": scan_rate_v_per_s,
+        },
+    }
+    with out_csv.with_suffix(".meta.json").open("w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+
     return out_csv
 
 
@@ -80,21 +107,21 @@ def main() -> None:
     print(f"Repeat Ipc RSD (%): {compute_repeat_rsd(ipc_vals):.2f}% (target <= {CFG.target_rsd_pct}%)")
 
     for a in analyses:
-        print(f"\nFile: {a['file']} | Raw baseline std: {a['raw_noise']['baseline_std']:.4f} µA")
+        print(f"\nFile: {a['file']} | Raw noise sigma: {a['raw_noise']['noise_sigma']:.4f} µA")
         for fname, fres in a["filters"].items():
             print(
                 f"  [{fname}] shift={fres['max_peak_shift_mv']:.2f} mV, "
                 f"dI={fres['max_peak_current_chg_pct']:.2f}%, within_targets={fres['within_targets']}"
             )
 
-if not args.simulate:
-    try:
-        pwr_csv = run_four_state_power_profile(duration_per_state_s=2.0)
-        print(f"\nPower profile saved to: {pwr_csv.name}")
-    except RuntimeError as exc:
-        print(f"\nPower profiling skipped: {exc}")
-else:
-    print("\nPower profiling skipped in simulation mode.")
+    if not args.simulate:
+        try:
+            pwr_csv = run_four_state_power_profile(duration_per_state_s=2.0)
+            print(f"\nPower profile saved to: {pwr_csv.name}")
+        except RuntimeError as exc:
+            print(f"\nPower profiling skipped: {exc}")
+    else:
+        print("\nPower profiling skipped in simulation mode.")
 
 
 if __name__ == "__main__":
