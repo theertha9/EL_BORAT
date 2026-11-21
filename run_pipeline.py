@@ -1,13 +1,69 @@
 import argparse #xyz
 import json
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
 import pandas as pd
-from config import CFG, DATA_DIR
+from config import BASE_DIR, CFG, DATA_DIR
 from cv_analyze import analyze_single_csv, compute_repeat_rsd
 from power_profile import run_four_state_power_profile
 from typing import List
+
+
+def write_synthetic_report(
+    report_path: Path,
+    csv_path: Path,
+    measurements: pd.DataFrame,
+) -> None:
+    """Write the sample_dataset settings and generated synthetic readings."""
+    with report_path.open("x", encoding="utf-8") as report:
+        report.write("CYCLIC VOLTAMMETRY EXPERIMENT REPORT\n")
+        report.write("=" * 38 + "\n\n")
+        report.write("Data source: SYNTHETIC (not physical instrument readings)\n")
+        report.write(f"Configuration source: {BASE_DIR / 'sample_dataset.txt'}\n")
+        report.write(f"Raw CSV: {csv_path.name}\n")
+        report.write(f"Report: {report_path.name}\n\n")
+
+        report.write("EXPERIMENT AND HARDWARE CONFIGURATION\n")
+        report.write("-------------------------------------\n")
+        for name, value in asdict(CFG).items():
+            report.write(f"CFG.{name}: {value}\n")
+        report.write("\n")
+
+        report.write("READINGS AT EACH GENERATED POTENTIAL STEP\n")
+        report.write("-----------------------------------------\n")
+        report.write(
+            "The first pre-step reading is unavailable because simulation "
+            "does not sample a physical baseline. Later pre-step values are "
+            "the preceding generated point. Each after-step value is the "
+            "synthetic measurement generated for that commanded potential; "
+            "individual instrument samples are not available in simulation.\n\n"
+        )
+
+        previous = None
+        for row in measurements.itertuples(index=False):
+            report.write(
+                f"Step {row.sample_idx} | t={row.t_rel_s:.6f} s | "
+                f"commanded potential={row.v_cmd_v:.9g} V\n"
+            )
+            if previous is None:
+                report.write("  Before: no physical baseline reading (simulation)\n")
+            else:
+                report.write(
+                    f"  Before (previous generated point): "
+                    f"potential={previous.v_meas_v:.9g} V, "
+                    f"current-sense={previous.v_curr_sense_v:.9g} V, "
+                    f"current={previous.current_a:.9g} A\n"
+                )
+            report.write(
+                f"  After (synthetic): potential={row.v_meas_v:.9g} V, "
+                f"current-sense={row.v_curr_sense_v:.9g} V, "
+                f"current={row.current_a:.9g} A "
+                f"({row.current_ua:.9g} uA), "
+                f"temperature={row.temp_c}\n\n"
+            )
+            previous = row
 
 
 def make_synthetic_cv_csv(
@@ -47,7 +103,7 @@ def make_synthetic_cv_csv(
 
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     out_csv = DATA_DIR / f"cv_raw_sim_{run_id}_rep{repeat_idx}.csv"
-    pd.DataFrame(
+    measurements = pd.DataFrame(
         {
             "sample_idx": np.arange(len(v)),
             "t_rel_s": t,
@@ -59,8 +115,10 @@ def make_synthetic_cv_csv(
             "temp_c": 25.0 + 0.05 * repeat_idx,
             "step_elapsed_s": np.gradient(t),
         }
-    ).to_csv(out_csv, index=False)
+    )
+    measurements.to_csv(out_csv, index=False)
 
+    report_path = out_csv.with_suffix(".report.txt")
     metadata = {
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "run_label": "synthetic",
@@ -81,9 +139,13 @@ def make_synthetic_cv_csv(
             "achieved_scan_rate_v_per_s": scan_rate_v_per_s,
             "requested_scan_rate_v_per_s": scan_rate_v_per_s,
         },
+        "program_config": asdict(CFG),
+        "report_file": report_path.name,
     }
     with out_csv.with_suffix(".meta.json").open("w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
+
+    write_synthetic_report(report_path, out_csv, measurements)
 
     return out_csv
 
@@ -117,7 +179,12 @@ def main() -> None:
             return
         p = eyes.open()
         for r in range(1, args.repeats + 1):
-            raw_path, meta_path = acquire_cv_scan(p, run_label="ferricyanide", repeat_idx=r)
+            raw_path, meta_path = acquire_cv_scan(
+                p,
+                run_label="ferricyanide",
+                repeat_idx=r,
+                setup_audit=audit,
+            )
             print(f"Saved: {raw_path.name}, {meta_path.name}")
             csv_files.append(raw_path)
 
@@ -148,4 +215,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
