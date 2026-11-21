@@ -10,7 +10,10 @@ from power_profile import run_four_state_power_profile
 from typing import List
 
 
-def make_synthetic_cv_csv(repeat_idx: int, scan_rate_v_per_s: float = 0.05) -> Path:
+def make_synthetic_cv_csv(
+    repeat_idx: int,
+    scan_rate_v_per_s: float = CFG.scan_rate_v_per_s,
+) -> Path:
     """Create a synthetic reversible-like CV trace for offline testing before hardware wiring."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     v_fwd = np.linspace(CFG.v_start, CFG.v_vertex, int(round(abs(CFG.v_vertex - CFG.v_start) / CFG.step_v)) + 1)
@@ -88,7 +91,12 @@ def make_synthetic_cv_csv(repeat_idx: int, scan_rate_v_per_s: float = 0.05) -> P
 def main() -> None:
     parser = argparse.ArgumentParser(description="BORAT CV Enhancement Pipeline (ExpEYES/SEELab3)")
     parser.add_argument("--simulate", action="store_true", help="Run without physical ExpEYES hardware")
-    parser.add_argument("--repeats", type=int, default=3, help="Number of repeat scans (>=3 recommended)")
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=CFG.n_repeats,
+        help="Number of repeat scans (>=3 recommended)",
+    )
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error("--repeats must be at least 1.")
@@ -140,4 +148,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
