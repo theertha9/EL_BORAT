@@ -46,6 +46,8 @@ def estimate_noise_metrics(current: np.ndarray) -> dict:
     diff = np.diff(current)
     median_diff = np.median(diff)
     mad = np.median(np.abs(diff - median_diff))
+    if not np.isfinite(noise_std) or noise_std <= 0:
+        raise ValueError("A valid positive noise estimate is required.")
 
     noise_sigma = float(1.4826 * mad / np.sqrt(2.0))
     signal_peak = float(np.max(np.abs(current)))
@@ -464,6 +466,10 @@ def analyze_single_csv(
     pot = df["v_meas_v"].to_numpy(dtype=float)
     curr = df["current_ua"].to_numpy(dtype=float)
     v_cmd = df["v_cmd_v"].to_numpy(dtype=float)
+    if not np.allclose(v_cmd, first_cycle, atol=1e-9, rtol=0):
+        raise ValueError(
+            "CSV commanded potentials do not match the expected first CV cycle."
+        )
     t = df["t_rel_s"].to_numpy(dtype=float)
 
     if not (
