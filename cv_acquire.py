@@ -86,7 +86,7 @@ def acquire_cv_scan(
     temp_c_override: float | None = None,
     cfg=CFG,
 ) -> tuple[Path, Path]:
-     """
+    """
     Execute a cyclic voltammetry sweep using PV1 and log raw data to CSV + JSON metadata.
     Never overwrites or mutates raw data after writing.
     """
@@ -389,5 +389,7 @@ def acquire_cv_scan(
         )
 
     return raw_csv_path, meta_json_path
+
+    
 
     
