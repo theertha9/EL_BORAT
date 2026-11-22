@@ -13,8 +13,8 @@ from config import BASE_DIR, CFG, DATA_DIR
 from cv_analyze import analyze_single_csv, compute_repeat_rsd
 
 
-# Must match the provisional capacitance assumption in cv_analyze.py.
-# This is a simulation/model parameter, not an experimental measurement.
+# Keep this equal to the provisional assumption in cv_analyze.py.
+# It is a simulation parameter, not an experimentally measured value.
 DEFAULT_CDL_UF_CM2 = 20.0
 
 
@@ -23,7 +23,7 @@ def write_synthetic_report(
     csv_path: Path,
     measurements: pd.DataFrame,
 ) -> None:
-    """Write the sample_dataset settings and generated synthetic readings."""
+    """Write the configuration and generated synthetic readings."""
     with report_path.open("x", encoding="utf-8") as report:
         report.write("CYCLIC VOLTAMMETRY EXPERIMENT REPORT\n")
         report.write("=" * 38 + "\n\n")
@@ -64,7 +64,6 @@ def write_synthetic_report(
             report.write(f"CFG.{name}: {value}\n")
 
         report.write("\n")
-
         report.write("READINGS AT EACH GENERATED POTENTIAL STEP\n")
         report.write("-----------------------------------------\n")
         report.write(
@@ -113,32 +112,53 @@ def make_synthetic_cv_csv(
     """Create a synthetic CV trace for offline testing."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Validate the parameters needed to generate capacitive current.
     area_cm2 = getattr(CFG, "electrode_area_cm2", None)
 
-    if area_cm2 is None or not np.isfinite(area_cm2) or area_cm2 <= 0:
+    if (
+        area_cm2 is None
+        or not np.isfinite(area_cm2)
+        or area_cm2 <= 0
+    ):
         raise ValueError(
             "Synthetic CV generation requires a positive "
             "CFG.electrode_area_cm2 value."
         )
 
-    if not np.isfinite(scan_rate_v_per_s) or scan_rate_v_per_s <= 0:
-        raise ValueError("Scan rate must be a positive finite value.")
+    if (
+        not np.isfinite(scan_rate_v_per_s)
+        or scan_rate_v_per_s <= 0
+    ):
+        raise ValueError(
+            "Scan rate must be a positive finite value."
+        )
 
     if DEFAULT_CDL_UF_CM2 <= 0:
-        raise ValueError("The assumed capacitance must be positive.")
+        raise ValueError(
+            "The assumed capacitance must be positive."
+        )
+
+    if CFG.step_v <= 0:
+        raise ValueError("CFG.step_v must be positive.")
 
     # Construct the forward and reverse potential sweeps.
     v_fwd = np.linspace(
         CFG.v_start,
         CFG.v_vertex,
-        int(round(abs(CFG.v_vertex - CFG.v_start) / CFG.step_v)) + 1,
+        int(
+            round(
+                abs(CFG.v_vertex - CFG.v_start) / CFG.step_v
+            )
+        ) + 1,
     )
 
     v_rev = np.linspace(
         CFG.v_vertex,
         CFG.v_end,
-        int(round(abs(CFG.v_end - CFG.v_vertex) / CFG.step_v)) + 1,
+        int(
+            round(
+                abs(CFG.v_end - CFG.v_vertex) / CFG.step_v
+            )
+        ) + 1,
     )[1:]
 
     v = np.concatenate([v_fwd, v_rev])
@@ -146,7 +166,7 @@ def make_synthetic_cv_csv(
     forward_mask = np.arange(len(v)) < len(v_fwd)
     reverse_mask = ~forward_mask
 
-    # Generate reproducible random noise for each repeat.
+    # Reproducible random noise.
     rng = np.random.default_rng(seed=100 + repeat_idx)
 
     noise_ua = rng.normal(
@@ -155,7 +175,7 @@ def make_synthetic_cv_csv(
         size=len(v),
     )
 
-    # Generate simulated faradaic oxidation and reduction peaks.
+    # Simulated faradaic oxidation and reduction peaks.
     scale = np.sqrt(scan_rate_v_per_s / 0.05)
 
     faradaic_current_ua = np.zeros(len(v), dtype=float)
@@ -163,20 +183,22 @@ def make_synthetic_cv_csv(
     faradaic_current_ua[forward_mask] = (
         17.0
         * scale
-        * np.exp(-((v[forward_mask] - 0.25) / 0.065) ** 2)
+        * np.exp(
+            -((v[forward_mask] - 0.25) / 0.065) ** 2
+        )
     )
 
     faradaic_current_ua[reverse_mask] = (
         -16.5
         * scale
-        * np.exp(-((v[reverse_mask] - 0.16) / 0.065) ** 2)
+        * np.exp(
+            -((v[reverse_mask] - 0.16) / 0.065) ** 2
+        )
     )
 
-    # Generate a known capacitive background.
-    #
+    # Capacitive background:
     # i_C = C_dl * A * scan_rate
     #
-    # Units:
     # uF/cm^2 * cm^2 * V/s = uA
 
     capacitive_amplitude_ua = (
@@ -185,11 +207,13 @@ def make_synthetic_cv_csv(
         * scan_rate_v_per_s
     )
 
-    forward_sign = np.sign(CFG.v_vertex - CFG.v_start)
+    forward_sign = np.sign(
+        CFG.v_vertex - CFG.v_start
+    )
 
     if forward_sign == 0:
         raise ValueError(
-            "The starting and vertex potentials must be different."
+            "Starting and vertex potentials must be different."
         )
 
     capacitive_background_ua = np.where(
@@ -198,14 +222,14 @@ def make_synthetic_cv_csv(
         -forward_sign * capacitive_amplitude_ua,
     )
 
-    # Combine all three components into the measured synthetic signal.
+    # Total synthetic measured current.
     i_ua = (
         faradaic_current_ua
         + capacitive_background_ua
         + noise_ua
     )
 
-    # Calculate elapsed time across the complete sweep.
+    # Generate elapsed time across the complete sweep.
     total_sweep_distance = (
         abs(CFG.v_vertex - CFG.v_start)
         + abs(CFG.v_end - CFG.v_vertex)
@@ -219,7 +243,9 @@ def make_synthetic_cv_csv(
         len(v),
     )
 
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    run_id = datetime.now().strftime(
+        "%Y%m%d_%H%M%S_%f"
+    )
 
     out_csv = (
         DATA_DIR
@@ -232,7 +258,11 @@ def make_synthetic_cv_csv(
             "t_rel_s": t,
             "v_cmd_v": v,
             "v_meas_v": (
-                v + rng.normal(0.0, 0.0005, size=len(v))
+                v + rng.normal(
+                    0.0,
+                    0.0005,
+                    size=len(v),
+                )
             ),
             "v_curr_sense_v": (
                 i_ua * 1e-6 * CFG.shunt_ohm
@@ -250,7 +280,10 @@ def make_synthetic_cv_csv(
         }
     )
 
-    measurements.to_csv(out_csv, index=False)
+    measurements.to_csv(
+        out_csv,
+        index=False,
+    )
 
     report_path = out_csv.with_suffix(".report.txt")
 
@@ -337,7 +370,9 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.repeats < 1:
-        parser.error("--repeats must be at least 1.")
+        parser.error(
+            "--repeats must be at least 1."
+        )
 
     if args.power:
         parser.error(
@@ -349,12 +384,14 @@ def main() -> int:
     csv_files: List[Path] = []
 
     if args.simulate:
-        print("Running in --simulate mode (synthetic data)...")
+        print(
+            "Running in --simulate mode (synthetic data)..."
+        )
 
-        for r in range(1, args.repeats + 1):
+        for repeat_idx in range(1, args.repeats + 1):
             csv_files.append(
                 make_synthetic_cv_csv(
-                    r,
+                    repeat_idx,
                     CFG.scan_rate_v_per_s,
                 )
             )
@@ -373,14 +410,16 @@ def main() -> int:
         )
 
         if not audit["connected"] or p is None:
-            print("Hardware audit failed. Acquisition cancelled.")
+            print(
+                "Hardware audit failed. Acquisition cancelled."
+            )
             return 1
 
-        for r in range(1, args.repeats + 1):
+        for repeat_idx in range(1, args.repeats + 1):
             raw_path, meta_path = acquire_cv_scan(
                 p,
                 run_label="ferricyanide",
-                repeat_idx=r,
+                repeat_idx=repeat_idx,
                 setup_audit=audit,
             )
 
@@ -391,7 +430,9 @@ def main() -> int:
             csv_files.append(raw_path)
 
     if not csv_files:
-        print("No CSV files were generated or acquired.")
+        print(
+            "No CSV files were generated or acquired."
+        )
         return 1
 
     # Analyze every generated or acquired CSV.
@@ -403,15 +444,15 @@ def main() -> int:
         for csv_file in csv_files
     ]
 
-    # Calculate repeatability using the raw peak measurements.
+    # Calculate repeatability from raw peak measurements.
     ipa_vals = [
-        a["raw_peaks"]["ipa"]
-        for a in analyses
+        analysis["raw_peaks"]["ipa"]
+        for analysis in analyses
     ]
 
     ipc_vals = [
-        a["raw_peaks"]["ipc"]
-        for a in analyses
+        analysis["raw_peaks"]["ipc"]
+        for analysis in analyses
     ]
 
     print(
@@ -459,5 +500,6 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 
