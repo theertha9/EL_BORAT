@@ -94,8 +94,14 @@ def _write_cv_report(
     report_path: Path,
     metadata: dict,
     rows: list[dict],
+    sample_rows: list[dict],
 ) -> None:
     """Write experiment settings and per-step readings to a text report."""
+    samples_by_step: dict[int, list[dict]] = {}
+
+    for sample in sample_rows:
+        samples_by_step.setdefault(sample["sample_idx"], []).append(sample)
+
     with report_path.open("x", encoding="utf-8") as report:
         report.write("CYCLIC VOLTAMMETRY EXPERIMENT REPORT\n")
         report.write("=" * 38 + "\n\n")
@@ -103,6 +109,7 @@ def _write_cv_report(
         report.write(f"Run label: {metadata['run_label']}\n")
         report.write(f"Repeat index: {metadata['repeat_idx']}\n")
         report.write(f"Raw CSV: {metadata['raw_csv']}\n")
+        report.write(f"Individual readings CSV: {metadata['sample_readings_csv']}\n")
         report.write(
             f"Report status: "
             f"{'complete' if metadata['acquisition']['complete'] else 'incomplete'}\n\n"
@@ -148,7 +155,8 @@ def _write_cv_report(
             "setpoint. Each later pre-command value is the preceding step's "
             "averaged reading (no additional samples or sweep delays are added).\n"
             "Post-command values are averages over the configured averaging "
-            "window. Individual readings from each window follow each step.\n\n"
+            "window. Individual readings from each window are stored in the "
+            "separate individual-readings CSV file.\n\n"
         )
 
         if not rows:
@@ -179,7 +187,7 @@ def _write_cv_report(
 
             report.write("  Individual readings during averaging window:\n")
 
-            samples = json.loads(row["sample_readings_json"])
+            samples = samples_by_step.get(row["sample_idx"], [])
 
             if not samples:
                 report.write("    No individual readings recorded.\n")
@@ -227,7 +235,8 @@ def acquire_cv_scan(
     Execute a cyclic voltammetry sweep using PV1 and log raw data
     to CSV and JSON metadata.
 
-    Never overwrites or mutates raw data after writing.
+    Individual instrument readings are stored in a separate CSV.
+    Raw data files are never overwritten.
     """
 
     if not cfg.calibrated:
@@ -244,6 +253,7 @@ def acquire_cv_scan(
 
     raw_csv_path = DATA_DIR / f"{base_name}.csv"
     meta_json_path = DATA_DIR / f"{base_name}.meta.json"
+    samples_csv_path = DATA_DIR / f"{base_name}_samples.csv"
 
     # Build the complete commanded potential sequence.
     potentials = build_sweep_potentials(
@@ -284,9 +294,12 @@ def acquire_cv_scan(
 
     positive_intervals = step_intervals[step_intervals > 0]
 
-    if len(positive_intervals) and (
-        cfg.avg_window_s > 0.8 * float(np.min(positive_intervals))
-    ):
+    if len(positive_intervals) == 0:
+        raise ValueError(
+            "The potential sequence must contain at least two distinct points."
+        )
+
+    if cfg.avg_window_s > 0.8 * float(np.min(positive_intervals)):
         raise ValueError(
             "avg_window_s must not exceed 80% of the shortest step interval."
         )
@@ -297,17 +310,19 @@ def acquire_cv_scan(
     )
 
     rows = []
+    sample_rows = []
     command_times = []
 
     acquisition_error = None
+    acquisition_exception = None
     reset_error = None
+    reset_exception = None
     complete = False
     post_reset_readings = {}
 
     start_utc = datetime.now(timezone.utc).isoformat()
     t0 = time.perf_counter()
 
-    # Temperature source is explicitly recorded.
     temperature_source = (
         "manual" if temp_c_override is not None else "stub"
     )
@@ -348,28 +363,26 @@ def acquire_cv_scan(
             step_start = command_time
 
             # Use the next interval; reuse the last interval at the final point.
+            # This gives the final potential a full averaging interval too.
             step_interval = step_intervals[
                 min(idx, len(step_intervals) - 1)
             ]
 
-            window_start = deadline + step_interval - cfg.avg_window_s
+            # Collect readings during the final part of this step interval.
+            window_end = deadline + step_interval
+            window_start = window_end - cfg.avg_window_s
 
             remaining = window_start - time.perf_counter()
 
             if remaining > 0:
                 time.sleep(remaining)
 
-            window_start = time.perf_counter()
-
+            # Do not extend the scheduled window if acquisition is late.
+            # The loop ends at the planned end of the step interval.
             potential_samples = []
             current_samples = []
-            sample_readings = []
 
-            # Collect readings throughout the averaging window.
-            while (
-                time.perf_counter() - window_start
-                < cfg.avg_window_s
-            ):
+            while time.perf_counter() < window_end:
                 potential_sample = float(
                     p.get_voltage(cfg.potential_channel)
                 )
@@ -388,8 +401,9 @@ def acquire_cv_scan(
                 potential_samples.append(potential_sample)
                 current_samples.append(current_sample)
 
-                sample_readings.append(
+                sample_rows.append(
                     {
+                        "sample_idx": idx,
                         "t_rel_s": sample_time - t0,
                         "potential_v": potential_sample,
                         "current_sense_v": current_sample,
@@ -398,11 +412,12 @@ def acquire_cv_scan(
                     }
                 )
 
-            window_end = time.perf_counter()
+            window_actual_end = time.perf_counter()
 
             if not potential_samples or not current_samples:
                 raise RuntimeError(
-                    f"No readings collected at sample {idx}."
+                    f"No readings collected at sample {idx}. "
+                    "The scheduled averaging window may have been missed."
                 )
 
             # Average readings without modifying the raw instrument values.
@@ -416,7 +431,7 @@ def acquire_cv_scan(
                 fallback_c=temp_c_override,
             )
 
-            # Use the midpoint of the averaging window as its timestamp.
+            # Use the midpoint of the scheduled averaging window as timestamp.
             t_rel = (
                 (window_start + window_end) / 2.0
             ) - t0
@@ -433,8 +448,7 @@ def acquire_cv_scan(
                     "current_a": i_a,
                     "current_ua": i_a * 1e6,
                     "temp_c": temp_c,
-                    "step_elapsed_s": window_end - step_start,
-                    "sample_readings_json": json.dumps(sample_readings),
+                    "step_elapsed_s": window_actual_end - step_start,
                 }
             )
 
@@ -443,7 +457,8 @@ def acquire_cv_scan(
 
         complete = True
 
-    except Exception as exc:
+    except BaseException as exc:
+        acquisition_exception = exc
         acquisition_error = repr(exc)
 
     finally:
@@ -451,7 +466,8 @@ def acquire_cv_scan(
         try:
             p.set_pv1(0.0)
 
-        except Exception as exc:
+        except BaseException as exc:
+            reset_exception = exc
             reset_error = repr(exc)
 
         else:
@@ -497,7 +513,7 @@ def acquire_cv_scan(
             f"exceeding the allowed {cfg.max_rate_error_pct:.2f}%."
         )
 
-    # Use fixed columns so even an interrupted scan produces a readable CSV.
+    # Fixed columns ensure interrupted scans still produce readable CSV files.
     csv_columns = [
         "sample_idx",
         "t_rel_s",
@@ -510,20 +526,33 @@ def acquire_cv_scan(
         "step_elapsed_s",
         "v_pre_v",
         "v_curr_sense_pre_v",
-        "sample_readings_json",
+    ]
+
+    sample_csv_columns = [
+        "sample_idx",
+        "t_rel_s",
+        "potential_v",
+        "current_sense_v",
+        "current_a",
+        "current_ua",
     ]
 
     df = pd.DataFrame(rows, columns=csv_columns)
+    samples_df = pd.DataFrame(sample_rows, columns=sample_csv_columns)
 
-    # Exclusive creation: do not overwrite an existing raw data file.
+    # Exclusive creation: do not overwrite existing raw data files.
     with raw_csv_path.open("x", encoding="utf-8", newline="") as f:
         df.to_csv(f, index=False)
+
+    with samples_csv_path.open("x", encoding="utf-8", newline="") as f:
+        samples_df.to_csv(f, index=False)
 
     metadata = {
         "created_utc": start_utc,
         "run_label": run_label,
         "repeat_idx": repeat_idx,
         "raw_csv": raw_csv_path.name,
+        "sample_readings_csv": samples_csv_path.name,
 
         "scan_params": {
             "v_start": cfg.v_start,
@@ -544,6 +573,7 @@ def acquire_cv_scan(
             "max_rate_error_pct": cfg.max_rate_error_pct,
             "rate_within_tolerance": rate_within_tolerance,
             "n_samples_saved": len(rows),
+            "n_individual_readings_saved": len(sample_rows),
             "complete": complete,
             "acquisition_error": acquisition_error,
             "reset_error": reset_error,
@@ -557,8 +587,10 @@ def acquire_cv_scan(
             "shunt_ohm": cfg.shunt_ohm,
             "tia_gain_v_per_a": cfg.tia_gain_v_per_a,
             "current_sign": cfg.current_sign,
-            "potential_range_v": cfg.range_potential_v,
-            "current_range_v": cfg.range_current_v,
+            "requested_ranges_not_applied": {
+                "potential_range_v": cfg.range_potential_v,
+                "current_range_v": cfg.range_current_v,
+            },
             "calibrated": cfg.calibrated,
             "temperature": {
                 "value_c": temp_c_override,
@@ -584,23 +616,35 @@ def acquire_cv_scan(
     with meta_json_path.open("x", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, allow_nan=False)
 
-    _write_cv_report(report_path, metadata, rows)
+    _write_cv_report(report_path, metadata, rows, sample_rows)
 
-    # The CSV and metadata are saved before an acquisition/reset error
+    # The CSV files and metadata are saved before an acquisition/reset error
     # is raised, preserving partial data for diagnosis.
-    if acquisition_error is not None:
-        raise RuntimeError(
-            f"CV acquisition failed. Partial data saved to "
-            f"{raw_csv_path}. Error: {acquisition_error}"
+    if acquisition_exception is not None:
+        if isinstance(acquisition_exception, Exception):
+            raise RuntimeError(
+                f"CV acquisition failed. Partial data saved to "
+                f"{raw_csv_path}. Error: {acquisition_error}"
+            ) from acquisition_exception
+
+        # Preserve KeyboardInterrupt/SystemExit after saving partial data.
+        raise acquisition_exception.with_traceback(
+            acquisition_exception.__traceback__
         )
 
-    if reset_error is not None:
-        raise RuntimeError(
-            f"CV data was acquired, but PV1 reset failed: {reset_error}. "
-            f"Data saved to {raw_csv_path}."
+    if reset_exception is not None:
+        if isinstance(reset_exception, Exception):
+            raise RuntimeError(
+                f"CV data was acquired, but PV1 reset failed: {reset_error}. "
+                f"Data saved to {raw_csv_path}."
+            ) from reset_exception
+
+        raise reset_exception.with_traceback(
+            reset_exception.__traceback__
         )
 
     return raw_csv_path, meta_json_path
+
 
     
 
