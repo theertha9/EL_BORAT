@@ -195,13 +195,17 @@ def main() -> None:
     print(f"Repeat Ipa RSD (%): {compute_repeat_rsd(ipa_vals):.2f}% (target <= {CFG.target_rsd_pct}%)")
     print(f"Repeat Ipc RSD (%): {compute_repeat_rsd(ipc_vals):.2f}% (target <= {CFG.target_rsd_pct}%)")
 
-    for a in analyses:
-        print(f"\nFile: {a['file']} | Raw noise sigma: {a['raw_noise']['noise_sigma']:.4f} µA")
-        for fname, fres in a["filters"].items():
-            print(
-                f"  [{fname}] shift={fres['max_peak_shift_mv']:.2f} mV, "
-                f"dI={fres['max_peak_current_chg_pct']:.2f}%, within_targets={fres['within_targets']}"
-            )
+for a in analyses:
+    print(f"\nFile: {a['file']} | Raw noise sigma: {a['raw_noise']['noise_sigma']:.4f} µA")
+    for fname, fres in a["filters"].items():
+        if fres.get("skipped"):
+            print(f"  [{fname}] SKIPPED: {fres['reason']}")
+            continue
+
+        print(
+            f"  [{fname}] shift={fres['max_peak_shift_mv']:.2f} mV, "
+            f"dI={fres['max_peak_current_chg_pct']:.2f}%, within_targets={fres['within_targets']}"
+        )
 
     if not args.simulate:
         try:
