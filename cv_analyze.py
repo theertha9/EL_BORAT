@@ -1,7 +1,8 @@
+
 from __future__ import annotations
 
-from pathlib import Path
 import json
+from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
@@ -10,6 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from scipy.fft import dct, idct
 from scipy.signal import (
     butter,
     filtfilt,
@@ -31,7 +33,6 @@ def estimate_noise_metrics(current: np.ndarray) -> dict:
     noise contributions are reasonably independent.
     """
     current = np.asarray(current, dtype=float)
-
     current = current[np.isfinite(current)]
 
     if len(current) < 3:
@@ -41,16 +42,21 @@ def estimate_noise_metrics(current: np.ndarray) -> dict:
             "snr_linear": np.nan,
             "snr_db": np.nan,
         }
+
     diff = np.diff(current)
     median_diff = np.median(diff)
     mad = np.median(np.abs(diff - median_diff))
-    
+
     noise_sigma = float(1.4826 * mad / np.sqrt(2.0))
     signal_peak = float(np.max(np.abs(current)))
 
     if noise_sigma > 0:
         snr_linear = signal_peak / noise_sigma
-        snr_db = float(20.0 * np.log10(snr_linear)) if snr_linear > 0 else np.nan
+        snr_db = (
+            float(20.0 * np.log10(snr_linear))
+            if snr_linear > 0
+            else np.nan
+        )
     elif signal_peak > 0:
         snr_linear = np.inf
         snr_db = np.inf
@@ -66,6 +72,197 @@ def estimate_noise_metrics(current: np.ndarray) -> dict:
     }
 
 
+def dct_spectrum(
+    current: np.ndarray,
+    step_v: float,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """
+    Calculate the DCT-II power spectrum of one CV branch.
+
+    The frequency axis is expressed in cycles per volt, not Hz.
+    The branch is treated independently, avoiding an artificial
+    connection between the end of one branch and the start of another.
+    """
+    y = np.asarray(current, dtype=float)
+
+    if y.ndim != 1:
+        raise ValueError("Current data must be one-dimensional.")
+
+    if len(y) < 3:
+        raise ValueError("At least three samples are required for a DCT.")
+
+    if not np.all(np.isfinite(y)):
+        raise ValueError("Current data contains non-finite values.")
+
+    if not np.isfinite(step_v) or step_v <= 0:
+        raise ValueError("step_v must be finite and positive.")
+
+    coefficients = dct(y, type=2, norm="ortho")
+    n = len(y)
+
+    frequencies = np.arange(n, dtype=float) / (2.0 * n * step_v)
+    power = np.square(np.abs(coefficients))
+
+    upper_half = np.abs(coefficients[n // 2:])
+    noise_sigma = float(np.median(upper_half) / 0.6745)
+
+    return frequencies, power, noise_sigma
+
+
+def estimate_dct_cutoff(
+    current: np.ndarray,
+    step_v: float,
+    margin_bins: int = 2,
+) -> dict:
+    """
+    Estimate a DCT low-pass cutoff from the high-frequency noise floor.
+
+    The power spectrum is smoothed over five bins. The cutoff is placed
+    beyond the last bin whose smoothed power exceeds five times the
+    estimated noise variance, with an additional bin margin.
+    """
+    frequencies, power, noise_sigma = dct_spectrum(current, step_v)
+
+    if margin_bins < 0:
+        raise ValueError("margin_bins cannot be negative.")
+
+    if not np.isfinite(noise_sigma):
+        raise ValueError("Could not estimate the DCT noise floor.")
+
+    noise_power = noise_sigma ** 2
+
+    smoothed_power = np.convolve(
+        power,
+        np.ones(5, dtype=float) / 5.0,
+        mode="same",
+    )
+
+    threshold = 5.0 * noise_power
+
+    # Ignore the DC coefficient when looking for signal frequencies.
+    significant = np.flatnonzero(
+        smoothed_power[1:] > threshold
+    ) + 1
+
+    if len(significant) == 0:
+        last_significant = 1
+    else:
+        last_significant = int(significant[-1])
+
+    cutoff_index = min(
+        last_significant + margin_bins,
+        len(frequencies) - 1,
+    )
+
+    return {
+        "cutoff_index": cutoff_index,
+        "cutoff_cycles_per_v": float(frequencies[cutoff_index]),
+        "noise_sigma": noise_sigma,
+        "noise_power": noise_power,
+        "threshold_power": threshold,
+        "frequencies": frequencies,
+        "power": power,
+        "smoothed_power": smoothed_power,
+    }
+
+
+def dct_lowpass(
+    current: np.ndarray,
+    step_v: float,
+    cutoff_cycles_per_v: float | None = None,
+) -> tuple[np.ndarray, dict]:
+    """
+    Apply a DCT-II low-pass filter to one CV branch.
+
+    If cutoff_cycles_per_v is None, the cutoff is estimated
+    automatically. A raised-cosine transition attenuates coefficients
+    above the cutoff instead of abruptly removing them.
+    """
+    y = np.asarray(current, dtype=float)
+
+    if y.ndim != 1:
+        raise ValueError("Current data must be one-dimensional.")
+
+    if len(y) < 3:
+        raise ValueError("At least three samples are required for DCT filtering.")
+
+    if not np.all(np.isfinite(y)):
+        raise ValueError("Current data contains non-finite values.")
+
+    if not np.isfinite(step_v) or step_v <= 0:
+        raise ValueError("step_v must be finite and positive.")
+
+    coefficients = dct(y, type=2, norm="ortho")
+    n = len(y)
+
+    frequencies = np.arange(n, dtype=float) / (2.0 * n * step_v)
+
+    if cutoff_cycles_per_v is None:
+        cutoff_info = estimate_dct_cutoff(y, step_v)
+        cutoff_index = cutoff_info["cutoff_index"]
+        cutoff = cutoff_info["cutoff_cycles_per_v"]
+        noise_sigma = cutoff_info["noise_sigma"]
+    else:
+        if (
+            not np.isfinite(cutoff_cycles_per_v)
+            or cutoff_cycles_per_v <= 0
+        ):
+            raise ValueError("fft_cutoff must be finite and positive.")
+
+        if cutoff_cycles_per_v >= frequencies[-1]:
+            raise ValueError(
+                "fft_cutoff must be below the maximum DCT frequency."
+            )
+
+        cutoff_index = int(
+            np.searchsorted(frequencies, cutoff_cycles_per_v)
+        )
+        cutoff_index = max(1, min(cutoff_index, n - 1))
+        cutoff = float(frequencies[cutoff_index])
+
+        upper_half = np.abs(coefficients[n // 2:])
+        noise_sigma = float(np.median(upper_half) / 0.6745)
+
+    # The transition starts at the selected cutoff and extends over
+    # several bins. This avoids the ringing associated with a brick wall.
+    transition_bins = max(2, int(np.ceil(0.10 * cutoff_index)))
+    transition_end = min(
+        cutoff_index + transition_bins,
+        n - 1,
+    )
+
+    weights = np.ones(n, dtype=float)
+
+    if transition_end > cutoff_index:
+        transition_indices = np.arange(
+            cutoff_index,
+            transition_end + 1,
+        )
+
+        phase = (
+            transition_indices - cutoff_index
+        ) / (transition_end - cutoff_index)
+
+        weights[transition_indices] = (
+            0.5 * (1.0 + np.cos(np.pi * phase))
+        )
+
+    weights[transition_end + 1:] = 0.0
+
+    filtered_coefficients = coefficients * weights
+    filtered = idct(filtered_coefficients, type=2, norm="ortho")
+
+    diagnostic = {
+        "cutoff_cycles_per_v": cutoff,
+        "cutoff_index": cutoff_index,
+        "noise_sigma": noise_sigma,
+        "frequencies": frequencies,
+        "power": np.square(np.abs(coefficients)),
+        "weights": weights,
+    }
+
+    return filtered, diagnostic
+
 
 def apply_filter(
     current: np.ndarray,
@@ -76,9 +273,15 @@ def apply_filter(
     median_kernel: int = 5,
     lowpass_cutoff_hz: float = 5.0,
     notch_freq_hz: float = 50.0,
+    step_v: float | None = None,
+    fft_cutoff: float | None = None,
 ) -> np.ndarray:
-    """Apply a selectable filter to a copy of the current array."""
+    """
+    Apply a selectable filter to a copy of the current array.
 
+    The fft method uses a DCT-II low-pass filter. Its frequency axis is
+    in cycles per volt, so it requires step_v rather than dt_s.
+    """
     y = np.asarray(current, dtype=float).copy()
 
     if y.ndim != 1:
@@ -89,6 +292,17 @@ def apply_filter(
 
     if method == "raw" or method is None:
         return y
+
+    if method == "fft":
+        if step_v is None:
+            raise ValueError("step_v is required for the fft filter.")
+
+        filtered, _ = dct_lowpass(
+            y,
+            step_v=step_v,
+            cutoff_cycles_per_v=fft_cutoff,
+        )
+        return filtered
 
     if method == "savgol":
         if sg_poly < 0:
@@ -162,9 +376,6 @@ def apply_filter(
 
     raise ValueError(f"Unknown filter method: {method}")
 
-#filter_methods=("savgol", "median")
-
-
 
 def extract_peaks(
     potential_v: np.ndarray,
@@ -177,8 +388,11 @@ def extract_peaks(
     """
     Split the first CV cycle into forward and reverse branches.
 
-    The commanded potential determines the vertex location and sweep
-    direction. Peak potentials are reported using measured potential.
+    Peak classification follows the scan direction:
+    - If the scan starts below its vertex, the forward branch is anodic.
+    - If the scan starts above its vertex, the reverse branch is anodic.
+
+    Peak potentials are reported using measured potential.
     """
     potential_v = np.asarray(potential_v, dtype=float)
     current = np.asarray(current, dtype=float)
@@ -211,16 +425,6 @@ def extract_peaks(
         else 0.0
     )
 
-    anodic_candidates, anodic_props = find_peaks(
-        fwd_i,
-        prominence=prominence,
-    )
-
-    cathodic_candidates, cathodic_props = find_peaks(
-        -rev_i,
-        prominence=prominence,
-    )
-
     result = {
         "epa_v": np.nan,
         "ipa": np.nan,
@@ -228,27 +432,46 @@ def extract_peaks(
         "ipc": np.nan,
     }
 
+    if v_vertex > v_start:
+        anodic_signal = fwd_i
+        cathodic_signal = -rev_i
+        anodic_potential = fwd_e
+        cathodic_potential = rev_e
+        anodic_branch_current = fwd_i
+        cathodic_branch_current = rev_i
+    else:
+        anodic_signal = rev_i
+        cathodic_signal = -fwd_i
+        anodic_potential = rev_e
+        cathodic_potential = fwd_e
+        anodic_branch_current = rev_i
+        cathodic_branch_current = fwd_i
+
+    anodic_candidates, anodic_props = find_peaks(
+        anodic_signal,
+        prominence=prominence,
+    )
+
+    cathodic_candidates, cathodic_props = find_peaks(
+        cathodic_signal,
+        prominence=prominence,
+    )
+
     if len(anodic_candidates) > 0:
-        best = int(
-            np.argmax(anodic_props["prominences"])
-        )
+        best = int(np.argmax(anodic_props["prominences"]))
         anodic_idx = int(anodic_candidates[best])
 
-        result["epa_v"] = float(fwd_e[anodic_idx])
-        result["ipa"] = float(fwd_i[anodic_idx])
+        result["epa_v"] = float(anodic_potential[anodic_idx])
+        result["ipa"] = float(anodic_branch_current[anodic_idx])
 
     if len(cathodic_candidates) > 0:
-        best = int(
-            np.argmax(cathodic_props["prominences"])
-        )
+        best = int(np.argmax(cathodic_props["prominences"]))
         cathodic_idx = int(cathodic_candidates[best])
 
-        result["epc_v"] = float(rev_e[cathodic_idx])
-        result["ipc"] = float(rev_i[cathodic_idx])
+        result["epc_v"] = float(cathodic_potential[cathodic_idx])
+        result["ipc"] = float(cathodic_branch_current[cathodic_idx])
 
     return result
-
-
 
 
 def evaluate_filter_against_raw(
@@ -261,9 +484,7 @@ def evaluate_filter_against_raw(
     noise_std: float,
     cfg=CFG,
 ) -> dict:
-    """
-    Compare filtered peak positions and currents against raw peaks.
-    """
+    """Compare filtered peak positions and currents against raw peaks."""
 
     raw_peaks = extract_peaks(
         potential_v,
@@ -362,21 +583,77 @@ def compute_repeat_rsd(values: list[float]) -> float:
 
     return float((sample_std / abs(mean)) * 100.0)
 
-    
+
+def save_spectrum_diagnostic(
+    spectrum_path: Path,
+    forward_diagnostic: dict,
+    reverse_diagnostic: dict,
+) -> None:
+    """Save DCT power spectra for the forward and reverse branches."""
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    for label, diagnostic in (
+        ("Forward branch", forward_diagnostic),
+        ("Reverse branch", reverse_diagnostic),
+    ):
+        frequencies = diagnostic["frequencies"]
+        power = diagnostic["power"]
+        cutoff = diagnostic["cutoff_cycles_per_v"]
+        noise_sigma = diagnostic["noise_sigma"]
+
+        positive = frequencies > 0
+        epsilon = np.finfo(float).tiny
+
+        ax.plot(
+            frequencies[positive],
+            np.log10(np.maximum(power[positive], epsilon)),
+            linewidth=1.2,
+            label=label,
+        )
+
+        if np.isfinite(noise_sigma):
+            noise_power = max(noise_sigma ** 2, epsilon)
+            ax.axhline(
+                np.log10(noise_power),
+                linestyle=":",
+                linewidth=1.0,
+                alpha=0.7,
+            )
+
+        ax.axvline(
+            cutoff,
+            linestyle="--",
+            linewidth=1.2,
+            label=f"{label} cutoff: {cutoff:.2f} cycles/V",
+        )
+
+    ax.set_xlabel("Spatial frequency [cycles/V]")
+    ax.set_ylabel("Log10 DCT power")
+    ax.set_title("DCT spectrum and selected low-pass cutoffs")
+    ax.legend()
+    ax.grid(False)
+
+    fig.tight_layout()
+    fig.savefig(spectrum_path, dpi=200)
+    plt.close(fig)
 
 
 def analyze_single_csv(
     raw_csv_path: Path,
-    filter_methods: tuple[str, ...] = ("savgol", "median"),
+    filter_methods: tuple[str, ...] = ("savgol", "median", "fft"),
     save_plot: bool = True,
+    fft_cutoff: float | None = None,
 ) -> dict:
     """
     Analyze one complete CV acquisition CSV.
 
-    Uses acquisition metadata to identify the scan parameters and
-    isolates the first CV cycle before peak extraction.
-    """
+    Uses acquisition metadata to identify scan parameters and isolates
+    the first CV cycle before peak extraction.
 
+    The fft filter is a DCT-II low-pass filter applied independently
+    to the forward and reverse branches.
+    """
     raw_csv_path = Path(raw_csv_path)
     meta_json_path = raw_csv_path.with_suffix(".meta.json")
 
@@ -393,6 +670,7 @@ def analyze_single_csv(
 
     acquisition = metadata.get("acquisition", {})
     scan_params = metadata.get("scan_params", {})
+    program_config = metadata.get("program_config", {})
 
     if not acquisition.get("complete", False):
         raise ValueError(
@@ -441,8 +719,6 @@ def analyze_single_csv(
             f"CSV is missing required columns: {missing_columns}"
         )
 
-    # Identify the expected first-cycle length using the same
-    # sweep-generation function used by acquisition.
     first_cycle = build_sweep_potentials(
         v_start,
         v_vertex,
@@ -456,17 +732,17 @@ def analyze_single_csv(
             "CSV contains fewer samples than expected for one complete cycle."
         )
 
-    # Analyze only the first cycle.
     df = df.iloc[:len(first_cycle)].copy()
 
     pot = df["v_meas_v"].to_numpy(dtype=float)
     curr = df["current_ua"].to_numpy(dtype=float)
     v_cmd = df["v_cmd_v"].to_numpy(dtype=float)
+    t = df["t_rel_s"].to_numpy(dtype=float)
+
     if not np.allclose(v_cmd, first_cycle, atol=1e-9, rtol=0):
         raise ValueError(
             "CSV commanded potentials do not match the expected first CV cycle."
         )
-    t = df["t_rel_s"].to_numpy(dtype=float)
 
     if not (
         np.all(np.isfinite(pot))
@@ -495,33 +771,51 @@ def analyze_single_csv(
         noise_std,
     )
 
-    # Locate the first-cycle vertex using commanded potential.
     if v_vertex > v_start:
         vertex_idx = int(np.argmax(v_cmd))
     else:
         vertex_idx = int(np.argmin(v_cmd))
 
-    # Split branches at the vertex. The vertex is included in both
-    # branches for filtering, then included only once when rejoined.
     fwd_current = curr[:vertex_idx + 1]
     rev_current = curr[vertex_idx:]
 
     filter_results = {}
     filtered_traces = {}
+    fft_diagnostics = {}
 
     for method in filter_methods:
         try:
-            filtered_fwd = apply_filter(
-                fwd_current,
-                dt_s=dt,
-                method=method,
-            )
+            if method == "fft":
+                filtered_fwd, forward_diagnostic = dct_lowpass(
+                    fwd_current,
+                    step_v=step_v,
+                    cutoff_cycles_per_v=fft_cutoff,
+                )
 
-            filtered_rev = apply_filter(
-                rev_current,
-                dt_s=dt,
-                method=method,
-            )
+                filtered_rev, reverse_diagnostic = dct_lowpass(
+                    rev_current,
+                    step_v=step_v,
+                    cutoff_cycles_per_v=fft_cutoff,
+                )
+
+                fft_diagnostics = {
+                    "forward": forward_diagnostic,
+                    "reverse": reverse_diagnostic,
+                }
+            else:
+                filtered_fwd = apply_filter(
+                    fwd_current,
+                    dt_s=dt,
+                    method=method,
+                    step_v=step_v,
+                )
+
+                filtered_rev = apply_filter(
+                    rev_current,
+                    dt_s=dt,
+                    method=method,
+                    step_v=step_v,
+                )
 
             filtered_current = np.concatenate(
                 [filtered_fwd, filtered_rev[1:]]
@@ -548,11 +842,32 @@ def analyze_single_csv(
                 **filter_validation,
             }
 
+            if method == "fft":
+                filter_results[method]["forward_cutoff_cycles_per_v"] = (
+                    forward_diagnostic["cutoff_cycles_per_v"]
+                )
+                filter_results[method]["reverse_cutoff_cycles_per_v"] = (
+                    reverse_diagnostic["cutoff_cycles_per_v"]
+                )
+
         except (ValueError, RuntimeError) as exc:
             filter_results[method] = {
                 "skipped": True,
                 "reason": str(exc),
             }
+
+    spectrum_path = None
+
+    if fft_diagnostics:
+        spectrum_path = raw_csv_path.with_name(
+            f"{raw_csv_path.stem}_spectrum.png"
+        )
+
+        save_spectrum_diagnostic(
+            spectrum_path,
+            fft_diagnostics["forward"],
+            fft_diagnostics["reverse"],
+        )
 
     plot_path = None
 
@@ -560,22 +875,20 @@ def analyze_single_csv(
         fig, ax = plt.subplots(figsize=(10, 7), facecolor="white")
         ax.set_facecolor("white")
 
-        area_cm2 = CFG.electrode_area_cm2
+        area_cm2 = program_config.get("electrode_area_cm2")
+        if area_cm2 is not None:
+            area_cm2 = float(area_cm2)
+
         if area_cm2 is not None and area_cm2 > 0.0:
             plot_curr = curr / (area_cm2 * 1000.0)
             plot_filtered = (
-                filtered_traces["savgol"] / (area_cm2 * 1000.0)
-                if "savgol" in filtered_traces
-                else plot_curr
+                filtered_traces.get("savgol", curr)
+                / (area_cm2 * 1000.0)
             )
             y_label = "Current density [mA cm$^{-2}$]"
         else:
             plot_curr = curr
-            plot_filtered = (
-                filtered_traces["savgol"]
-                if "savgol" in filtered_traces
-                else curr
-            )
+            plot_filtered = filtered_traces.get("savgol", curr)
             y_label = "Current [µA]"
 
         fwd_order = np.argsort(pot[:vertex_idx + 1])
@@ -625,6 +938,7 @@ def analyze_single_csv(
         ax.set_ylabel(y_label, fontsize=20, fontweight="bold")
         ax.xaxis.set_label_coords(0.5, -0.10)
         ax.yaxis.set_label_coords(-0.12, 0.5)
+
         ax.tick_params(
             axis="both",
             which="major",
@@ -633,27 +947,58 @@ def analyze_single_csv(
             length=8,
             direction="out",
         )
+
         for spine in ax.spines.values():
             spine.set_linewidth(1.5)
             spine.set_color("black")
 
-        x_min = float(np.min(pot))
-        x_max = float(np.max(pot))
-        ax.set_xlim(-0.25, 0.85)
+        x_min = min(v_start, v_vertex, v_end)
+        x_max = max(v_start, v_vertex, v_end)
+        x_span = max(x_max - x_min, step_v)
+
+        x_padding = 0.04 * x_span
+        ax.set_xlim(
+            x_min - x_padding,
+            x_max + x_padding,
+        )
+
+        x_ticks = np.linspace(x_min, x_max, 6)
+        ax.set_xticks(x_ticks)
+        ax.xaxis.set_major_formatter(
+            plt.FuncFormatter(lambda value, _: f"{value:.2f}")
+        )
 
         y_min = float(np.min(plot_curr))
         y_max = float(np.max(plot_curr))
         y_span = max(y_max - y_min, 1e-9)
-        ax.set_ylim(y_min - 0.12 * y_span, y_max + 0.12 * y_span)
-
-        x_ticks = np.arange(-0.2, 0.801, 0.2)
-        ax.set_xticks(x_ticks)
-        ax.xaxis.set_major_formatter(
-            plt.FuncFormatter(lambda value, _: f"{value:.1f}")
+        ax.set_ylim(
+            y_min - 0.12 * y_span,
+            y_max + 0.12 * y_span,
         )
+
         ax.yaxis.set_major_formatter(
             plt.FuncFormatter(lambda value, _: f"{value:g}")
         )
+
+        calibrated = program_config.get("calibrated", False)
+
+        if not calibrated:
+            ax.text(
+                0.02,
+                0.98,
+                "WARNING: Data is marked as not calibrated",
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                color="red",
+                fontsize=11,
+                fontweight="bold",
+                bbox={
+                    "facecolor": "white",
+                    "edgecolor": "red",
+                    "alpha": 0.9,
+                },
+            )
 
         ax.grid(False)
 
@@ -661,20 +1006,26 @@ def analyze_single_csv(
         ipa = raw_peaks["ipa"]
         epc = raw_peaks["epc_v"]
         ipc = raw_peaks["ipc"]
+
         if area_cm2 is not None and area_cm2 > 0.0:
             ipa = ipa / (area_cm2 * 1000.0)
             ipc = ipc / (area_cm2 * 1000.0)
 
         y_low, y_high = ax.get_ylim()
+
         if np.isfinite(epa) and np.isfinite(ipa):
             ax.vlines(
-                epa, y_low, ipa,
+                epa,
+                y_low,
+                ipa,
                 colors="black",
                 linestyles=(0, (7, 5)),
                 linewidth=1.6,
             )
             ax.hlines(
-                ipa, ax.get_xlim()[0], epa,
+                ipa,
+                ax.get_xlim()[0],
+                epa,
                 colors="black",
                 linestyles=(0, (7, 5)),
                 linewidth=1.6,
@@ -702,13 +1053,17 @@ def analyze_single_csv(
 
         if np.isfinite(epc) and np.isfinite(ipc):
             ax.vlines(
-                epc, y_low, ipc,
+                epc,
+                y_low,
+                ipc,
                 colors="black",
                 linestyles=(0, (7, 5)),
                 linewidth=1.6,
             )
             ax.hlines(
-                ipc, ax.get_xlim()[0], epc,
+                ipc,
+                ax.get_xlim()[0],
+                epc,
                 colors="black",
                 linestyles=(0, (7, 5)),
                 linewidth=1.6,
@@ -744,11 +1099,14 @@ def analyze_single_csv(
         "file": raw_csv_path.name,
         "metadata_file": meta_json_path.name,
         "plot_file": plot_path.name if plot_path else None,
+        "spectrum_file": spectrum_path.name if spectrum_path else None,
+        "simulated": bool(metadata.get("simulated", False)),
         "cycles_analyzed": 1,
         "raw_noise": raw_noise,
         "raw_peaks": raw_peaks,
         "filters": filter_results,
     }
+
 
 
 
