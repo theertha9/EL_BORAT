@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ExpEYES Electrochemistry Lab – 3D</title>
+<style>
+:root{--bg:#e9ecf1;--fg:#1b1f24;--pn:rgba(255,255,255,.93);--bd:#c4cad3;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#12151a;--fg:#e8eaed;--pn:rgba(28,32,38,.93);--bd:#3a414b}}
+:root[data-theme="dark"]{--bg:#12151a;--fg:#e8eaed;--pn:rgba(28,32,38,.93);--bd:#3a414b}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font:13px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden}
+#c{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none}
+#p{position:fixed;top:calc(env(safe-area-inset-top,0px) + 8px);left:8px;max-width:360px;background:var(--pn);border:1px solid var(--bd);border-radius:10px;padding:8px 10px}
+.r{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+button{font:inherit;color:var(--fg);background:transparent;border:1px solid var(--bd);border-radius:7px;padding:4px 9px;cursor:pointer}
+button.on{background:var(--fg);color:var(--bg)}
+button:focus-visible{outline:2px solid #3b82f6;outline-offset:1px}
+summary{cursor:pointer}
+#lg{display:grid;grid-template-columns:1fr 1fr;gap:3px 10px;margin-top:4px}
+#lg i{display:inline-block;width:10px;height:10px;border-radius:50%;border:1px solid #888;margin-right:5px}
+small{opacity:.75;display:block;margin-top:4px}
+</style></head><body>
+<canvas id="c"></canvas>
+<div id="p"><b>ExpEYES electrochemistry lab · 3D</b>
+<div class="r"><button id="bl" class="on">Labels</button><button id="bw" class="on">Wires</button><button id="br">Auto-rotate</button></div>
+<div class="r"><button data-v="o">Overview</button><button data-v="e">ExpEYES</button><button data-v="a">Arduino + ADC</button><button data-v="p">Potentiostat</button><button data-v="c">Cell</button></div>
+<details><summary>Wire colours</summary><div id="lg"></div></details>
+<small>Drag to rotate, scroll or pinch to zoom, right-drag to pan. Conceptual layout: confirm your ExpEYES model and electrical ratings before wiring.</small></div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+const T=THREE,PI=Math.PI,V=(x,y,z)=>new T.Vector3(x,y,z);
+const rd=new T.WebGLRenderer({canvas:document.getElementById('c'),antialias:true});
+rd.setPixelRatio(Math.min(devicePixelRatio,2));rd.shadowMap.enabled=true;rd.shadowMap.type=T.PCFSoftShadowMap;
+const sc=new T.Scene();sc.background=new T.Color((getComputedStyle(document.documentElement).getPropertyValue('--bg')||'#12151a').trim());
+const cam=new T.PerspectiveCamera(42,1,.5,600);cam.position.set(18,60,100);
+const ct=new T.OrbitControls(cam,rd.domElement);ct.enableDamping=true;ct.maxPolarAngle=PI*.495;ct.minDistance=8;ct.maxDistance=220;ct.target.set(-2,2,0);
+sc.add(new T.HemisphereLight('#ffffff','#667',.95));
+const dl=new T.DirectionalLight('#fff',.85);dl.position.set(-40,90,60);dl.castShadow=true;dl.shadow.mapSize.set(2048,2048);Object.assign(dl.shadow.camera,{left:-70,right:70,top:70,bottom:-70,near:10,far:250});sc.add(dl);
+/* helpers */
+const M=(c,o)=>new T.MeshStandardMaterial(Object.assign({color:c,roughness:.5,metalness:.1},o));
+const add=(p,g,m,x=0,y=0,z=0)=>{const o=new T.Mesh(g,m);o.position.set(x,y,z);o.castShadow=o.receiveShadow=true;p.add(o);return o};
+const bx=(p,w,h,d,c,x,y,z,o)=>add(p,new T.BoxGeometry(w,h,d),M(c,o),x,y,z);
+const cy=(p,r,h,c,x,y,z,o,rt)=>add(p,new T.CylinderGeometry(rt??r,r,h,28),M(c,o),x,y,z);
+const cz=(...a)=>{const m=cy(...a);m.rotation.x=PI/2;return m};
+const cx=(...a)=>{const m=cy(...a);m.rotation.z=PI/2;return m};
+const G=(x,y,z,s=1,p=sc)=>{const g=new T.Group();g.position.set(x,y,z);g.scale.setScalar(s);p.add(g);return g};
+const W=(g,x,y,z)=>g.localToWorld(V(x,y,z));
+const tex=(w,h,f)=>{const c=document.createElement('canvas');c.width=w;c.height=h;f(c.getContext('2d'),w,h);const t=new T.CanvasTexture(c);t.anisotropy=8;return t};
+const pl=(p,w,h,t,x,y,z,rx)=>{const m=new T.Mesh(new T.PlaneGeometry(w,h),new T.MeshStandardMaterial({map:t,roughness:.5}));m.position.set(x,y,z);m.rotation.x=rx;p.add(m);return m};
+const MET={metalness:.9,roughness:.25},GLD={metalness:.9,roughness:.25};
+const pcb=(p,w,d,y0,col,tx)=>{const k=64,t=tex(w*k,d*k,(x,cw,ch)=>{x.fillStyle=col;x.fillRect(0,0,cw,ch);x.strokeStyle='rgba(255,255,255,.55)';x.lineWidth=3;x.strokeRect(6,6,cw-12,ch-12);x.fillStyle='rgba(255,255,255,.92)';x.textAlign='center';x.textBaseline='middle';tx.forEach(([s,cx_,cz_,sz])=>{x.font='bold '+sz*k+'px sans-serif';x.fillText(s,(cx_+w/2)*k,(cz_+d/2)*k)})});bx(p,w,.16,d,col,0,y0-.08,0);pl(p,w,d,t,0,y0+.005,0,-PI/2)};
+const so=(p,w,d,h,r)=>[[-1,-1],[1,-1],[-1,1],[1,1]].forEach(([i,j])=>cy(p,r,h,'#b9a25a',i*(w/2-.4),h/2,j*(d/2-.4),{metalness:.8}));
+const pins=(p,a,y,h)=>a.forEach(([x,z])=>bx(p,.08,h,.08,'#d4af37',x,y+h/2,z,GLD));
+const row=(x0,z,n)=>Array.from({length:n},(_,i)=>[x0+i*.254,z]);
+const hdr=(p,x0,z,n,y0,hh)=>{bx(p,n*.254,hh,.25,'#111',x0+(n-1)*.127,y0+hh/2,z);pins(p,row(x0,z,n),y0+hh,.4)};
+const chip=(p,x,y,z,w,d)=>{bx(p,w,.35,d,'#15171a',x,y+.18,z);bx(p,w+.45,.07,d-.3,'#b5b9bf',x,y+.1,z,{metalness:.8});bx(p,w-.3,.07,d+.45,'#b5b9bf',x,y+.1,z,{metalness:.8});cy(p,.08,.02,'#ddd',x-w/2+.2,y+.36,z-d/2+.2)};
+const rnd=i=>{const a=Math.sin(i*12.9898)*43758.5453;return a-Math.floor(a)};
+const labels=[],wires=[];
+const lab=(t,p)=>{const c=document.createElement('canvas'),x=c.getContext('2d');x.font='bold 30px sans-serif';const w=Math.ceil(x.measureText(t).width)+24;c.width=w;c.height=48;x.font='bold 30px sans-serif';x.fillStyle='rgba(12,15,20,.88)';x.fillRect(0,0,w,48);x.fillStyle='#fff';x.textBaseline='middle';x.fillText(t,12,25);const s=new T.Sprite(new T.SpriteMaterial({map:new T.CanvasTexture(c),depthTest:false,transparent:true}));s.position.copy(p);s.scale.set(w/26,48/26,1);s.renderOrder=9;sc.add(s);labels.push(s)};
+const wire=(pts,c,r=.14)=>{wires.push(add(sc,new T.TubeGeometry(new T.CatmullRomCurve3(pts),80,r,8),M(c,{roughness:.6})));[pts[0],pts[pts.length-1]].forEach(p=>wires.push(add(sc,new T.SphereGeometry(r*1.5,12,8),M('#c9a227',GLD),p.x,p.y,p.z)))};
+const R=(a,b,h,s,top)=>{const L=t=>a.clone().lerp(b,t);return[a,a.clone().add(V(0,2.2,0)),L(.3).add(V(0,h,s)),L(.7).add(V(0,h*.8,s)),b.clone().add(top?V(0,2,0):V(0,1.2,s)),b]};
+const plug=(a,d)=>{bx(sc,2.4,.9,1.2,'#c8ccd2',a.x+d*1.2,a.y,a.z,MET);bx(sc,2.6,1.5,1.9,'#18191c',a.x+d*3.7,a.y,a.z);return V(a.x+d*5.2,a.y,a.z)};
+
+/* bench */
+bx(sc,116,2,72,'#9a7b55',0,-1,0,{roughness:.8});bx(sc,108,.1,64,'#2e4a3d',0,.05,0,{roughness:.9});
+
+/* laptop */
+const lap=G(-36,0,-16);
+bx(lap,32,1.1,22,'#aab0b8',0,.55,0,{metalness:.8,roughness:.3});
+pl(lap,28,11.4,tex(640,260,(x,w,h)=>{x.fillStyle='#1a1d22';x.fillRect(0,0,w,h);x.fillStyle='#3a3f47';for(let r=0;r<5;r++)for(let k=0;k<14;k++)x.fillRect(8+k*45.2,8+r*50,40,42)}),0,1.12,1.6,-PI/2);
+bx(lap,8,.05,5,'#8f959c',0,1.13,9);
+const lid=G(0,1.1,-10.5,1,lap);lid.rotation.x=-.28;
+bx(lid,32,21,.8,'#9aa0a8',0,10.5,0,{metalness:.7,roughness:.35});
+pl(lid,29,18,tex(640,400,(x,w,h)=>{x.fillStyle='#0b1c2b';x.fillRect(0,0,w,h);x.fillStyle='#16324a';x.fillRect(0,0,w,34);x.fillStyle='#9fd3ff';x.font='bold 20px sans-serif';x.fillText('ExpEYES · Cyclic voltammetry (I vs E)',12,23);x.strokeStyle='#244a66';x.lineWidth=1;for(let i=1;i<10;i++){x.beginPath();x.moveTo(i*64,50);x.lineTo(i*64,380);x.stroke()}for(let j=1;j<7;j++){x.beginPath();x.moveTo(20,50+j*47);x.lineTo(620,50+j*47);x.stroke()}x.strokeStyle='#ffd34d';x.lineWidth=3;x.beginPath();for(let a=0;a<=6.3;a+=.05){const px=320+Math.cos(a)*210,py=215-Math.sin(a)*85-Math.sin(2*a)*35;a?x.lineTo(px,py):x.moveTo(px,py)}x.stroke();x.fillStyle='#7cfc9a';x.font='16px sans-serif';x.fillText('T = 25.3 °C     pH = 6.98',12,392)}),0,10.5,.42,0);
+bx(lap,.5,.5,1.2,'#111',16,.55,-6);bx(lap,.5,.5,1.2,'#111',16,.55,6);
+
+/* ExpEYES board */
+const exp=G(0,0,-3),ey=.86,tl=['PV1','PV2','A1','A2','SEN','SQ1','OD1','GND'],tx=i=>-7+i*1.7;
+so(exp,16,10,.7,.25);
+pcb(exp,16,10,ey,'#0f6b3a',[['ExpEYES-17',-1.2,-2.2,1.2],['conceptual model',-1.2,-1.1,.5],['USB',-6.3,-.5,.45],...tl.map((t,i)=>[t,tx(i),2.5,.4])]);
+tl.forEach((t,i)=>{bx(exp,1.5,1.3,1.4,'#1e62c4',tx(i),ey+.65,3.9);cy(exp,.42,.12,'#c9ccd1',tx(i),ey+1.35,3.9,MET)});
+bx(exp,12,.9,.25,'#111',0,ey+.45,-4.5);pins(exp,row(-5.8,-4.5,30).map(([x,z],i)=>[-5.8+i*.4,z]),ey+.9,.4);
+bx(exp,2.2,1.2,1.3,'#b8bcc2',-7.2,ey+.6,-.5,MET);bx(exp,.1,.7,.8,'#111',-8.32,ey+.6,-.5);
+chip(exp,-2,ey,-1,3,3);chip(exp,2.5,ey,-1.5,2,1.2);chip(exp,4.8,ey,.5,1.6,1);
+[[-5.5,-2.5],[-6.4,-2.5],[-5.5,-1.2]].forEach(([x,z])=>{cy(exp,.55,1.2,'#1b2a6b',x,ey+.6,z);cy(exp,.5,.05,'#ccc',x,ey+1.22,z,MET)});
+bx(exp,.9,.35,.45,'#cfd2d6',.5,ey+.18,1.4,MET);
+[['#2ecc71',-3.5],['#e74c3c',-2.8],['#f1c40f',-2.1]].forEach(([c,x])=>cy(exp,.15,.25,c,x,ey+.12,2,{emissive:c,emissiveIntensity:.7}));
+for(let i=0;i<24;i++)bx(exp,.35,.12,.2,i%3?'#2a2a2a':'#c9b37a',-6+rnd(i)*11,ey+.06,-3+rnd(i+50)*5.5);
+
+/* Arduino Uno */
+const ard=G(-22,0,15,1.6),ay=.55;
+so(ard,6.86,5.33,ay,.2);
+pcb(ard,6.86,5.33,ay,'#0b6e78',[['ARDUINO UNO',.6,-1.35,.42],['5V',-.88,1.9,.14],['GND',-.45,2.05,.14],['A4',2.02,1.9,.13],['A5',2.3,2.05,.13],['D2',1.67,-1.9,.14]]);
+bx(ard,1.6,1.1,1.2,'#b8bcc2',-3,ay+.55,-1.2,MET);bx(ard,1.5,1.1,1,'#15161a',-2.95,ay+.55,1.5);
+hdr(ard,-1.9,2.5,8,ay,.85);hdr(ard,1,2.5,6,ay,.85);hdr(ard,.4,-2.5,8,ay,.85);hdr(ard,-2.6,-2.5,10,ay,.85);
+chip(ard,.9,ay,.1,3.4,.9);chip(ard,-1.6,ay,0,.9,.9);bx(ard,.8,.3,.4,'#cfd2d6',-.5,ay+.15,-1.7,MET);cy(ard,.28,.3,'#c0392b',-2.4,ay+.15,-2.0);
+
+/* ADS1115 breakout */
+const ads=G(-8,0,15,2.4),dy=.45;
+so(ads,2.5,1.8,dy,.1);
+pcb(ads,2.5,1.8,dy,'#6a2c91',[['ADS1115',0,-.42,.2],['VDD GND SCL SDA',-.1,.42,.07],['A0 A1 A2 A3',0,-.45+.0,.07]].slice(0,2));
+hdr(ads,-.635,.75,6,dy,.5);hdr(ads,-.38,-.75,4,dy,.5);chip(ads,0,dy,0,.6,.35);
+
+/* pH interface module */
+const phm=G(8,0,15,1.5),py=.5;
+so(phm,4.4,3.2,py,.12);
+pcb(phm,4.4,3.2,py,'#0a58b0',[['pH SENSOR MODULE',.2,-1.2,.28],['Po',-1.4,-.254,.15],['G',-1.4,0,.15],['V+',-1.4,.254,.15]]);
+cx(phm,.55,1.4,'#c8ccd2',2.5,py+.7,0,MET);cx(phm,.3,1.6,'#e8d28c',2.55,py+.7,0,MET);
+bx(phm,.25,.8,.8,'#111',-1.9,py+.4,0);pins(phm,[[-1.9,-.254],[-1.9,0],[-1.9,.254]],py+.8,.5);
+[[.4,1],[1.4,1]].forEach(([x,z])=>{bx(phm,.9,.7,.9,'#1a5fb4',x,py+.35,z);cy(phm,.22,.1,'#d4af37',x,py+.74,z,MET)});chip(phm,-.4,py,-.2,1.2,.8);
+
+/* potentiostat */
+const pot=G(28,0,-14);
+bx(pot,22,9,16,'#2b3038',0,4.5,0,{metalness:.4,roughness:.4});
+[[-9,-6],[9,-6],[-9,6],[9,6]].forEach(([x,z])=>cy(pot,.6,.4,'#111',x,-.1,z));
+const jk=[[-8,'#ff8c1a'],[-6.2,'#2ecc71'],[-4.4,'#1a1a1a'],[4.2,'#e53935'],[6.4,'#fdd835'],[8.6,'#1e88e5']];
+pl(pot,22,9,tex(880,360,(x,w,h)=>{x.fillStyle='#d8dce1';x.fillRect(0,0,w,h);x.fillStyle='#1b1f24';x.font='bold 26px sans-serif';x.fillText('POTENTIOSTAT',20,40);x.font='16px sans-serif';x.fillText('ExpEYES front-end · 3-electrode',20,64);x.textAlign='center';x.font='bold 14px sans-serif';[[-8,'CTRL IN'],[-6.2,'I OUT'],[-4.4,'GND'],[4.2,'WE'],[6.4,'RE'],[8.6,'CE']].forEach(([l,t])=>x.fillText(t,(l+11)*40,310))}),0,4.5,8.01,0);
+bx(pot,9.6,3.6,.3,'#111',0,6.4,8.1);
+pl(pot,9,3,tex(450,150,(x,w,h)=>{x.fillStyle='#0d3b36';x.fillRect(0,0,w,h);x.fillStyle='#8cf5c8';x.font='bold 30px monospace';x.fillText('E = −0.250 V',16,50);x.fillText('I =  12.4 µA',16,95);x.font='16px monospace';x.fillText('CV  50 mV/s',16,130)}),0,6.4,8.27,0);
+[-8.2,8.2].forEach(x=>{cz(pot,1.2,1.2,'#15171b',x,6.4,8.6);bx(pot,.12,.6,.3,'#fff',x,6.9,9.25)});
+jk.forEach(([x,c])=>{cz(pot,.9,.5,c,x,2.8,8.35);cz(pot,.45,.55,'#050505',x,2.8,8.37)});
+const J=jk.map(([x])=>W(pot,x,2.8,8.7));
+
+/* electrochemical cell on stirrer */
+const cell=G(34,0,6);
+bx(cell,19,2,19,'#e3e6ea',0,1,0);cz(cell,.9,.8,'#222',0,1,9.9);cy(cell,.2,.1,'#e53935',5,2.05,8,{emissive:'#e53935',emissiveIntensity:.8});
+const c=G(0,2,0,1,cell);
+const glass={transparent:true,opacity:.2,roughness:.05,metalness:0,side:T.DoubleSide,depthWrite:false};
+add(c,new T.CylinderGeometry(6,6,11,48,1,true),M('#cfeaff',glass),0,5.5,0);
+cy(c,6,.3,'#cfeaff',0,.15,0,glass);cy(c,5.85,8,'#6cc4e0',0,4.3,0,{transparent:true,opacity:.5,depthWrite:false});
+bx(c,2.4,.4,.5,'#fff',0,.5,0);cy(c,6.3,.5,'#30353b',0,11.25,0);
+const rod=(x,z,cap,o)=>{cy(c,.22,14,'#b9bdc3',x,8.5,z,o||MET);cy(c,.55,2.2,cap,x,16.6,z);cy(c,.15,1,'#c9a227',x,18.2,z,GLD)};
+rod(-3.5,-1,'#d12c2c');cy(c,.5,.3,'#d4af37',-3.5,1.6,-1,GLD);          /* WE */
+rod(3.5,-1,'#1e5fd0');bx(c,1.4,2.4,.05,'#e0e0e8',3.5,2.8,-1,MET);      /* CE */
+cy(c,.42,14,'#e8f4ff',0,8.5,-3.5,{transparent:true,opacity:.45,depthWrite:false});cy(c,.1,13,'#cfd2d6',0,8.5,-3.5,MET);cy(c,.55,2.2,'#e6c200',0,16.6,-3.5);cy(c,.15,1,'#c9a227',0,18.2,-3.5,GLD);bx(c,.3,.3,.3,'#fff',0,1.6,-3.5); /* RE */
+cy(c,.65,11,'#d5efff',2.2,8.5,2.8,{transparent:true,opacity:.55,depthWrite:false});add(c,new T.SphereGeometry(.7,16,12),M('#bfe9ff',{transparent:true,opacity:.6}),2.2,2.5,2.8);cy(c,.95,3,'#1d4ed8',2.2,15.5,2.8);cy(c,.5,1.2,'#c8ccd2',2.2,17.6,2.8,MET); /* pH */
+cy(c,.3,6.5,'#cfd3d8',-2.2,5.75,2.8,{metalness:.9,roughness:.25});cy(c,.38,3.5,'#111',-2.2,10.75,2.8); /* DS18B20 */
+const E={we:W(c,-3.5,18.7,-1),re:W(c,0,18.7,-3.5),ce:W(c,3.5,18.7,-1),ph:W(c,2.2,18.2,2.8),ds:W(c,-2.2,12.5,2.8)};
+sc.updateMatrixWorld(true);
+
+/* pin anchors */
+const AP=(x,z)=>W(ard,x,ay+1.25,z),DP=(x,z)=>W(ads,x,dy+.9,z),HP=z=>W(phm,-1.9,py+1.3,z);
+const V5=AP(-.88,2.5),GN=AP(-.5,2.5),D2=AP(1.67,-2.5),A4=AP(2.02,2.5),A5=AP(2.27,2.5);
+const TX=i=>W(exp,tx(i),ey+1.5,3.9);
+
+/* wires */
+const col={usb:'#202225',pv:'#ff8c1a',ai:'#2ecc71',gnd:'#222',red:'#e53935',ye:'#fdd835',bl:'#1e88e5',wh:'#f0f0f0',sda:'#a855f7',scl:'#06b6d4',ph:'#ec4899'};
+const sE=plug(W(exp,-8.3,ey+.6,-.5),-1),sL1=plug(W(lap,16.25,.55,-6),1),sL2=plug(W(lap,16.25,.55,6),1),sA=plug(W(ard,-3.8,ay+.55,-1.2),-1);
+wire([sL1,V(sL1.x+2,.4,-14),V(sE.x-1.5,.4,-8),sE],col.usb,.3);
+wire([sL2,V(-18,.4,-4),V(-31,.4,6),sA],col.usb,.3);
+wire(R(TX(0),J[0],6,3),col.pv);wire(R(TX(2),J[1],8,4),col.ai);wire(R(TX(7),J[2],4,2),col.gnd);
+wire(R(J[3],E.we,5,3,1),col.red);wire(R(J[4],E.re,8,1,1),col.ye);wire(R(J[5],E.ce,11,5,1),col.bl);
+const ds=V(E.ds.x,E.ds.y+2.5,E.ds.z);wire([E.ds,ds],'#111',.25);
+wire(R(ds.clone().add(V(-.15,0,0)),V5,9,4,1),col.red,.09);wire(R(ds,D2,12,-4,1),col.wh,.09);wire(R(ds.clone().add(V(.15,0,0)),GN,7,5,1),col.gnd,.09);
+const bn=W(phm,2.7,py+.7,0);wire([E.ph,V(E.ph.x,E.ph.y+3,E.ph.z+2),V((E.ph.x+bn.x)/2,16,(E.ph.z+bn.z)/2+3),V(bn.x+6,3,bn.z),V(bn.x+2.4,bn.y,bn.z)],'#18191c',.2);
+cx(sc,.7,2.4,'#111',bn.x+1.3,bn.y,bn.z).position.set(bn.x+1.3,bn.y,bn.z);
+wire(R(A4,DP(.127,.75),3,2,1),col.sda);wire(R(A5,DP(-.127,.75),5,3,1),col.scl);wire(R(V5,DP(-.635,.75),6,2,1),col.red);wire(R(GN,DP(-.38,.75),7,3,1),col.gnd);
+wire(R(HP(-.254),DP(-.38,-.75),3,-3,1),col.ph);wire(R(HP(.254),V5,9,4,1),col.red);wire(R(HP(0),GN,10,5,1),col.gnd);
+
+/* labels */
+lab('Laptop / PC · ExpEYES software',W(lap,0,25,-6));lab('ExpEYES-17 board',W(exp,0,7,0));lab('Arduino Uno',W(ard,0,5,0));lab('ADS1115 ADC',W(ads,0,2.8,0));lab('pH module + BNC',W(phm,0,4,0));
+lab('Potentiostat',W(pot,0,13,0));lab('Cell on stirrer',W(cell,0,1,12));lab('WE',V(E.we.x,E.we.y+3,E.we.z));lab('RE',V(E.re.x,E.re.y+3,E.re.z));lab('CE',V(E.ce.x,E.ce.y+3,E.ce.z));
+lab('pH electrode',V(E.ph.x+4,E.ph.y+4,E.ph.z+2));lab('DS18B20 probe',V(E.ds.x-6,E.ds.y+4,E.ds.z+3));lab('USB',V(-14,3,-10));
+
+/* UI */
+document.getElementById('lg').innerHTML=[['#ff8c1a','PV1 → CTRL IN'],['#2ecc71','I OUT → A1'],['#222','GND'],['#e53935','WE / +5 V'],['#fdd835','RE'],['#1e88e5','CE'],['#f0f0f0','DS18B20 data'],['#a855f7','I²C SDA'],['#06b6d4','I²C SCL'],['#ec4899','pH signal'],['#202225','USB / BNC cable']].map(([c,t])=>'<span><i style="background:'+c+'"></i>'+t+'</span>').join('');
+const tg=(id,fn)=>{const b=document.getElementById(id);b.onclick=()=>{b.classList.toggle('on');fn(b.classList.contains('on'))}};
+tg('bl',v=>labels.forEach(s=>s.visible=v));tg('bw',v=>wires.forEach(w=>w.visible=v));tg('br',v=>ct.autoRotate=v);ct.autoRotateSpeed=1.2;
+const VW={o:[[18,60,100],[-2,2,0]],e:[[-4,20,24],[0,1,-2]],a:[[-16,24,40],[-14,1,14]],p:[[28,18,10],[28,5,-14]],c:[[46,30,34],[34,8,6]]};let vt=null;
+document.querySelectorAll('[data-v]').forEach(b=>b.onclick=()=>{const v=VW[b.dataset.v];vt={p:V(...v[0]),t:V(...v[1])}});
+ct.addEventListener('start',()=>vt=null);
+const rs=()=>{rd.setSize(innerWidth,innerHeight,false);cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix()};addEventListener('resize',rs);rs();
+(function loop(){requestAnimationFrame(loop);if(vt){cam.position.lerp(vt.p,.07);ct.target.lerp(vt.t,.07);if(cam.position.distanceTo(vt.p)<.3)vt=null}ct.update();rd.render(sc,cam)})();
+</script></body></html>
