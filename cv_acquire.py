@@ -1,11 +1,15 @@
+
 from __future__ import annotations
+
 import json
 import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
+
 from config import CFG, DATA_DIR
 
 
@@ -16,13 +20,15 @@ def build_sweep_potentials(
     step_v: float,
     n_cycles: int = 1,
 ) -> np.ndarray:
-    """Build forward (v_start -> v_vertex) and reverse (v_vertex -> v_end) potential steps."""
+    """Build forward and reverse potential steps."""
     step = abs(step_v)
+
     if n_cycles < 1:
         raise ValueError("n_cycles must be at least 1.")
-    
+
     if not np.all(np.isfinite([v_start, v_vertex, v_end, step_v])):
         raise ValueError("Potential values and step_v must be finite.")
+
     if step <= 0:
         raise ValueError("step_v must be positive.")
 
@@ -30,24 +36,24 @@ def build_sweep_potentials(
     fwd = np.linspace(v_start, v_vertex, n_fwd + 1)
 
     n_rev = max(1, int(round(abs(v_end - v_vertex) / step)))
-    rev = np.linspace(v_vertex, v_end, n_rev + 1)[1:]  # avoid duplicating vertex point
+    rev = np.linspace(v_vertex, v_end, n_rev + 1)[1:]
 
     single_cycle = np.concatenate([fwd, rev])
 
     if n_cycles <= 1:
         return single_cycle
-    
+
     cycles = [single_cycle]
-    
+
     for _ in range(1, n_cycles):
         if not np.isclose(v_end, v_start):
             link = np.linspace(
                 v_end,
                 v_start,
-                max(2, int(round(abs(v_start - v_end) / step)) + 1)
+                max(2, int(round(abs(v_start - v_end) / step)) + 1),
             )[1:]
             cycles.append(link)
-    
+
         cycles.append(single_cycle[1:])
 
     return np.concatenate(cycles)
@@ -59,16 +65,22 @@ def voltage_to_current_a(measured_v: float, cfg=CFG) -> float:
         if cfg.shunt_ohm == 0:
             raise ValueError("shunt_ohm cannot be zero.")
         raw_i = measured_v / cfg.shunt_ohm
+
     elif cfg.current_mode == "tia":
         if cfg.tia_gain_v_per_a == 0:
             raise ValueError("tia_gain_v_per_a cannot be zero.")
         raw_i = measured_v / cfg.tia_gain_v_per_a
+
     else:
         raise ValueError(f"Unsupported current_mode: {cfg.current_mode}")
+
     return float(raw_i * cfg.current_sign)
 
-    
-def read_temperature_c(p=None, fallback_c: float | None = None) -> float | None:
+
+def read_temperature_c(
+    p=None,
+    fallback_c: float | None = None,
+) -> float | None:
     """
     Temperature sensor placeholder.
 
@@ -91,12 +103,17 @@ def _write_cv_report(
         report.write(f"Run label: {metadata['run_label']}\n")
         report.write(f"Repeat index: {metadata['repeat_idx']}\n")
         report.write(f"Raw CSV: {metadata['raw_csv']}\n")
-        report.write(f"Report status: {'complete' if metadata['acquisition']['complete'] else 'incomplete'}\n\n")
+        report.write(
+            f"Report status: "
+            f"{'complete' if metadata['acquisition']['complete'] else 'incomplete'}\n\n"
+        )
 
         report.write("EXPERIMENT AND HARDWARE SPECIFICATIONS\n")
         report.write("-------------------------------------\n")
+
         for name, value in metadata["program_config"].items():
             report.write(f"CFG.{name}: {value}\n")
+
         report.write("\n")
 
         for section_name in (
@@ -107,16 +124,21 @@ def _write_cv_report(
         ):
             report.write(f"{section_name.upper().replace('_', ' ')}\n")
             report.write("-" * len(section_name) + "\n")
+
             for name, value in metadata[section_name].items():
                 report.write(f"{name}: {value}\n")
+
             report.write("\n")
 
         setup_audit = metadata.get("setup_audit")
+
         if setup_audit is not None:
             report.write("PRE-SCAN SETUP AUDIT READINGS\n")
             report.write("-----------------------------\n")
+
             for name, value in setup_audit.items():
                 report.write(f"{name}: {value}\n")
+
             report.write("\n")
 
         report.write("READINGS BEFORE AND AFTER EACH POTENTIAL COMMAND\n")
@@ -137,10 +159,12 @@ def _write_cv_report(
                 f"Step {row['sample_idx']} | t={row['t_rel_s']:.6f} s | "
                 f"commanded PV1={row['v_cmd_v']:.9g} V\n"
             )
+
             report.write(
                 f"  Before: potential={row['v_pre_v']:.9g} V, "
                 f"current-sense={row['v_curr_sense_pre_v']:.9g} V\n"
             )
+
             report.write(
                 f"  After (averaged): potential={row['v_meas_v']:.9g} V, "
                 f"current-sense={row['v_curr_sense_v']:.9g} V, "
@@ -148,19 +172,24 @@ def _write_cv_report(
                 f"({row['current_ua']:.9g} uA), "
                 f"temperature={row['temp_c']}\n"
             )
+
             report.write(
                 f"  Step elapsed: {row['step_elapsed_s']:.6f} s\n"
             )
+
             report.write("  Individual readings during averaging window:\n")
 
             samples = json.loads(row["sample_readings_json"])
+
             if not samples:
                 report.write("    No individual readings recorded.\n")
+
             else:
                 report.write(
                     "    time_rel_s | potential_v | current_sense_v | "
                     "current_a | current_ua\n"
                 )
+
                 for sample in samples:
                     report.write(
                         f"    {sample['t_rel_s']:.6f} | "
@@ -169,18 +198,20 @@ def _write_cv_report(
                         f"{sample['current_a']:.9g} | "
                         f"{sample['current_ua']:.9g}\n"
                     )
+
             report.write("\n")
 
         report.write("READINGS AFTER THE SCAN / PV1 RESET\n")
         report.write("----------------------------------\n")
+
         for name, value in metadata["acquisition"]["post_reset_readings"].items():
             report.write(f"{name}: {value}\n")
 
         for key in ("acquisition_error", "reset_error"):
             error = metadata["acquisition"].get(key)
+
             if error is not None:
                 report.write(f"{key}: {error}\n")
-
 
 
 def acquire_cv_scan(
@@ -193,18 +224,18 @@ def acquire_cv_scan(
     cfg=CFG,
 ) -> tuple[Path, Path]:
     """
-    Execute a cyclic voltammetry sweep using PV1 and log raw data to CSV + JSON metadata.
+    Execute a cyclic voltammetry sweep using PV1 and log raw data
+    to CSV and JSON metadata.
+
     Never overwrites or mutates raw data after writing.
     """
-    
+
     if not cfg.calibrated:
         print(
             "WARNING: FRONT END IS NOT CALIBRATED. "
             "Current measurements are not validated."
         )
 
-   
-    
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     # Use microseconds to reduce filename collisions.
@@ -254,10 +285,10 @@ def acquire_cv_scan(
     positive_intervals = step_intervals[step_intervals > 0]
 
     if len(positive_intervals) and (
-        cfg.avg_window_s > float(np.min(positive_intervals))
+        cfg.avg_window_s > 0.8 * float(np.min(positive_intervals))
     ):
         raise ValueError(
-            "Averaging window is longer than the shortest potential-step interval."
+            "avg_window_s must not exceed 80% of the shortest step interval."
         )
 
     # Cumulative deadlines for each potential point.
@@ -310,10 +341,24 @@ def acquire_cv_scan(
 
             pre_potential = previous_potential
             pre_current_sense = previous_current_sense
+
             command_time = time.perf_counter()
             command_times.append(command_time)
 
             step_start = command_time
+
+            # Use the next interval; reuse the last interval at the final point.
+            step_interval = step_intervals[
+                min(idx, len(step_intervals) - 1)
+            ]
+
+            window_start = deadline + step_interval - cfg.avg_window_s
+
+            remaining = window_start - time.perf_counter()
+
+            if remaining > 0:
+                time.sleep(remaining)
+
             window_start = time.perf_counter()
 
             potential_samples = []
@@ -328,16 +373,21 @@ def acquire_cv_scan(
                 potential_sample = float(
                     p.get_voltage(cfg.potential_channel)
                 )
+
                 current_sample = float(
                     p.get_voltage(cfg.current_channel)
                 )
+
                 sample_time = time.perf_counter()
+
                 sample_current_a = voltage_to_current_a(
                     current_sample,
                     cfg,
                 )
+
                 potential_samples.append(potential_sample)
                 current_samples.append(current_sample)
+
                 sample_readings.append(
                     {
                         "t_rel_s": sample_time - t0,
@@ -387,6 +437,7 @@ def acquire_cv_scan(
                     "sample_readings_json": json.dumps(sample_readings),
                 }
             )
+
             previous_potential = v_meas
             previous_current_sense = v_curr_node
 
@@ -399,8 +450,10 @@ def acquire_cv_scan(
         # Always attempt to return PV1 to zero, including after failures.
         try:
             p.set_pv1(0.0)
+
         except Exception as exc:
             reset_error = repr(exc)
+
         else:
             for name, channel in (
                 ("potential_v", cfg.potential_channel),
@@ -410,6 +463,7 @@ def acquire_cv_scan(
                     post_reset_readings[name] = float(
                         p.get_voltage(channel)
                     )
+
                 except Exception as exc:
                     post_reset_readings[name] = f"Read error: {exc!r}"
 
@@ -519,6 +573,7 @@ def acquire_cv_scan(
                 "per Phase-I methodology."
             ),
         },
+
         "setup_audit": setup_audit,
         "program_config": asdict(cfg),
     }
