@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import math
@@ -16,7 +17,7 @@ CONFIG_FILE = BASE_DIR / "sample_dataset.txt"
 @dataclass(frozen=True)
 class HardwareConfig:
     # Potential sweep source on ExpEYES-17 / SEELab3 (PV1 is typically -5V to +5V)
-    v_start: float = -0.20          # Volts (vs reference)
+    v_start: float = -0.20          # Volts
     v_vertex: float = 0.60          # Volts (forward turn-around potential)
     v_end: float = -0.20            # Volts (return potential)
     scan_rate_v_per_s: float = 0.05 # 50 mV/s (proposal range: 0.02 to 0.20 V/s)
@@ -44,7 +45,7 @@ class HardwareConfig:
 
     # Acquisition timing
     equilibration_s: float = 2.0
-    avg_window_s: float = 0.08  # 5 periods at 50 Hz
+    avg_window_s: float = 0.08  # 4 periods at 50 Hz
     max_rate_error_pct: float = 5.0
 
     # Input voltage ranges (configure after verifying hardware support)
@@ -55,6 +56,7 @@ class HardwareConfig:
     calibrated: bool = False
     electrode_area_cm2: Optional[float] = None
     target_rsd_pct: float = 5.0     # <= 5% repeatability across >=3 repeats
+
     def __post_init__(self) -> None:
 
         # Validate cycle count
@@ -72,6 +74,9 @@ class HardwareConfig:
             for v in potentials
         ):
             raise ValueError("All potentials must be between -5 V and +5 V")
+
+        if math.isclose(self.v_start, self.v_vertex):
+            raise ValueError("v_vertex must differ from v_start")
 
         # Validate step size
         if not math.isfinite(self.step_v) or self.step_v <= 0:
@@ -106,12 +111,17 @@ class HardwareConfig:
         # Validate channel mapping
         p_channel = self.potential_channel.strip().upper()
         i_channel = self.current_channel.strip().upper()
-        
+
         object.__setattr__(self, "potential_channel", p_channel)
         object.__setattr__(self, "current_channel", i_channel)
 
-        if not p_channel or not i_channel:
-            raise ValueError("Channel names cannot be empty")
+        allowed_channels = {"A1", "A2", "A3"}
+
+        if p_channel not in allowed_channels:
+            raise ValueError("potential_channel must be A1, A2, or A3")
+
+        if i_channel not in allowed_channels:
+            raise ValueError("current_channel must be A1, A2, or A3")
 
         if p_channel == i_channel:
             raise ValueError("Potential and current channels must be distinct")
@@ -134,6 +144,14 @@ class HardwareConfig:
         ):
             raise ValueError(
                 "avg_window_s must be a whole multiple of 20 ms"
+            )
+
+        step_interval_s = self.step_v / self.scan_rate_v_per_s
+
+        if self.avg_window_s > step_interval_s:
+            raise ValueError(
+                "avg_window_s cannot exceed the potential-step interval "
+                "(step_v / scan_rate_v_per_s)."
             )
 
         # Validate scan-rate tolerance
@@ -161,6 +179,7 @@ class HardwareConfig:
             ):
                 raise ValueError("electrode_area_cm2 must be positive")
 
+
 def load_hardware_config(path: Path = CONFIG_FILE) -> HardwareConfig:
     """Load every HardwareConfig value from a name:value text file."""
     config_fields = {item.name: item.default for item in fields(HardwareConfig)}
@@ -179,39 +198,48 @@ def load_hardware_config(path: Path = CONFIG_FILE) -> HardwareConfig:
 
             name, raw_value = (part.strip() for part in content.split(":", 1))
             field_name = name[4:] if name.startswith("CFG.") else name
+
             if field_name not in config_fields:
                 raise ValueError(
                     f"{path}:{line_number}: unknown configuration variable "
                     f"'{name}'."
                 )
+
             if field_name in values:
                 raise ValueError(
                     f"{path}:{line_number}: duplicate configuration variable "
                     f"'{name}'."
                 )
+
             if not raw_value:
                 raise ValueError(
                     f"{path}:{line_number}: value for '{name}' cannot be empty."
                 )
 
             default = config_fields[field_name]
+
             try:
                 if isinstance(default, bool):
                     normalized = raw_value.lower()
                     if normalized not in {"true", "false"}:
                         raise ValueError("expected true or false")
                     values[field_name] = normalized == "true"
+
                 elif isinstance(default, int):
                     values[field_name] = int(raw_value)
+
                 elif isinstance(default, float):
                     values[field_name] = float(raw_value)
+
                 elif default is None:
                     values[field_name] = (
                         None if raw_value.lower() == "none"
                         else float(raw_value)
                     )
+
                 else:
                     values[field_name] = raw_value
+
             except ValueError as exc:
                 raise ValueError(
                     f"{path}:{line_number}: invalid value for '{name}': "
@@ -219,6 +247,7 @@ def load_hardware_config(path: Path = CONFIG_FILE) -> HardwareConfig:
                 ) from exc
 
     missing = sorted(set(config_fields) - set(values))
+
     if missing:
         raise ValueError(
             f"{path}: missing configuration variables: {', '.join(missing)}."
@@ -228,6 +257,7 @@ def load_hardware_config(path: Path = CONFIG_FILE) -> HardwareConfig:
 
 
 CFG = load_hardware_config()
+
 
 
 
