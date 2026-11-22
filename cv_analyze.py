@@ -1,8 +1,9 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
+import json
+import warnings
 
 import matplotlib
 matplotlib.use("Agg")
@@ -11,7 +12,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from scipy.fft import dct, idct
 from scipy.signal import (
     butter,
     filtfilt,
@@ -23,15 +23,11 @@ from scipy.ndimage import median_filter
 
 from config import CFG
 from cv_acquire import build_sweep_potentials
+from fft_filter import dct_spectrum, estimate_cutoff, dct_lowpass
 
 
 def estimate_noise_metrics(current: np.ndarray) -> dict:
-    """
-    Estimate noise using the MAD of successive current differences.
-
-    This is an approximate noise estimate and assumes successive
-    noise contributions are reasonably independent.
-    """
+    """Estimate noise using the MAD of successive current differences."""
     current = np.asarray(current, dtype=float)
     current = current[np.isfinite(current)]
 
@@ -72,201 +68,9 @@ def estimate_noise_metrics(current: np.ndarray) -> dict:
     }
 
 
-def dct_spectrum(
-    current: np.ndarray,
-    step_v: float,
-) -> tuple[np.ndarray, np.ndarray, float]:
-    """
-    Calculate the DCT-II power spectrum of one CV branch.
-
-    The frequency axis is expressed in cycles per volt, not Hz.
-    The branch is treated independently, avoiding an artificial
-    connection between the end of one branch and the start of another.
-    """
-    y = np.asarray(current, dtype=float)
-
-    if y.ndim != 1:
-        raise ValueError("Current data must be one-dimensional.")
-
-    if len(y) < 3:
-        raise ValueError("At least three samples are required for a DCT.")
-
-    if not np.all(np.isfinite(y)):
-        raise ValueError("Current data contains non-finite values.")
-
-    if not np.isfinite(step_v) or step_v <= 0:
-        raise ValueError("step_v must be finite and positive.")
-
-    coefficients = dct(y, type=2, norm="ortho")
-    n = len(y)
-
-    frequencies = np.arange(n, dtype=float) / (2.0 * n * step_v)
-    power = np.square(np.abs(coefficients))
-
-    upper_half = np.abs(coefficients[n // 2:])
-    noise_sigma = float(np.median(upper_half) / 0.6745)
-
-    return frequencies, power, noise_sigma
-
-
-def estimate_dct_cutoff(
-    current: np.ndarray,
-    step_v: float,
-    margin_bins: int = 2,
-) -> dict:
-    """
-    Estimate a DCT low-pass cutoff from the high-frequency noise floor.
-
-    The power spectrum is smoothed over five bins. The cutoff is placed
-    beyond the last bin whose smoothed power exceeds five times the
-    estimated noise variance, with an additional bin margin.
-    """
-    frequencies, power, noise_sigma = dct_spectrum(current, step_v)
-
-    if margin_bins < 0:
-        raise ValueError("margin_bins cannot be negative.")
-
-    if not np.isfinite(noise_sigma):
-        raise ValueError("Could not estimate the DCT noise floor.")
-
-    noise_power = noise_sigma ** 2
-
-    smoothed_power = np.convolve(
-        power,
-        np.ones(5, dtype=float) / 5.0,
-        mode="same",
-    )
-
-    threshold = 5.0 * noise_power
-
-    # Ignore the DC coefficient when looking for signal frequencies.
-    significant = np.flatnonzero(
-        smoothed_power[1:] > threshold
-    ) + 1
-
-    if len(significant) == 0:
-        last_significant = 1
-    else:
-        last_significant = int(significant[-1])
-
-    cutoff_index = min(
-        last_significant + margin_bins,
-        len(frequencies) - 1,
-    )
-
-    return {
-        "cutoff_index": cutoff_index,
-        "cutoff_cycles_per_v": float(frequencies[cutoff_index]),
-        "noise_sigma": noise_sigma,
-        "noise_power": noise_power,
-        "threshold_power": threshold,
-        "frequencies": frequencies,
-        "power": power,
-        "smoothed_power": smoothed_power,
-    }
-
-
-def dct_lowpass(
-    current: np.ndarray,
-    step_v: float,
-    cutoff_cycles_per_v: float | None = None,
-) -> tuple[np.ndarray, dict]:
-    """
-    Apply a DCT-II low-pass filter to one CV branch.
-
-    If cutoff_cycles_per_v is None, the cutoff is estimated
-    automatically. A raised-cosine transition attenuates coefficients
-    above the cutoff instead of abruptly removing them.
-    """
-    y = np.asarray(current, dtype=float)
-
-    if y.ndim != 1:
-        raise ValueError("Current data must be one-dimensional.")
-
-    if len(y) < 3:
-        raise ValueError("At least three samples are required for DCT filtering.")
-
-    if not np.all(np.isfinite(y)):
-        raise ValueError("Current data contains non-finite values.")
-
-    if not np.isfinite(step_v) or step_v <= 0:
-        raise ValueError("step_v must be finite and positive.")
-
-    coefficients = dct(y, type=2, norm="ortho")
-    n = len(y)
-
-    frequencies = np.arange(n, dtype=float) / (2.0 * n * step_v)
-
-    if cutoff_cycles_per_v is None:
-        cutoff_info = estimate_dct_cutoff(y, step_v)
-        cutoff_index = cutoff_info["cutoff_index"]
-        cutoff = cutoff_info["cutoff_cycles_per_v"]
-        noise_sigma = cutoff_info["noise_sigma"]
-    else:
-        if (
-            not np.isfinite(cutoff_cycles_per_v)
-            or cutoff_cycles_per_v <= 0
-        ):
-            raise ValueError("fft_cutoff must be finite and positive.")
-
-        if cutoff_cycles_per_v >= frequencies[-1]:
-            raise ValueError(
-                "fft_cutoff must be below the maximum DCT frequency."
-            )
-
-        cutoff_index = int(
-            np.searchsorted(frequencies, cutoff_cycles_per_v)
-        )
-        cutoff_index = max(1, min(cutoff_index, n - 1))
-        cutoff = float(frequencies[cutoff_index])
-
-        upper_half = np.abs(coefficients[n // 2:])
-        noise_sigma = float(np.median(upper_half) / 0.6745)
-
-    # The transition starts at the selected cutoff and extends over
-    # several bins. This avoids the ringing associated with a brick wall.
-    transition_bins = max(2, int(np.ceil(0.10 * cutoff_index)))
-    transition_end = min(
-        cutoff_index + transition_bins,
-        n - 1,
-    )
-
-    weights = np.ones(n, dtype=float)
-
-    if transition_end > cutoff_index:
-        transition_indices = np.arange(
-            cutoff_index,
-            transition_end + 1,
-        )
-
-        phase = (
-            transition_indices - cutoff_index
-        ) / (transition_end - cutoff_index)
-
-        weights[transition_indices] = (
-            0.5 * (1.0 + np.cos(np.pi * phase))
-        )
-
-    weights[transition_end + 1:] = 0.0
-
-    filtered_coefficients = coefficients * weights
-    filtered = idct(filtered_coefficients, type=2, norm="ortho")
-
-    diagnostic = {
-        "cutoff_cycles_per_v": cutoff,
-        "cutoff_index": cutoff_index,
-        "noise_sigma": noise_sigma,
-        "frequencies": frequencies,
-        "power": np.square(np.abs(coefficients)),
-        "weights": weights,
-    }
-
-    return filtered, diagnostic
-
-
 def apply_filter(
     current: np.ndarray,
-    dt_s: float,
+    dt_s: float | None = None,
     method: str = "savgol",
     sg_window: int = 11,
     sg_poly: int = 3,
@@ -279,30 +83,22 @@ def apply_filter(
     """
     Apply a selectable filter to a copy of the current array.
 
-    The fft method uses a DCT-II low-pass filter. Its frequency axis is
-    in cycles per volt, so it requires step_v rather than dt_s.
+    The DCT filter operates in the potential domain, so it requires
+    step_v rather than the time-domain sampling interval dt_s.
     """
     y = np.asarray(current, dtype=float).copy()
 
     if y.ndim != 1:
         raise ValueError("Current data must be one-dimensional.")
 
+    if not np.all(np.isfinite(y)):
+        raise ValueError("Current data contains non-finite values.")
+
     if len(y) < 3:
         return y
 
     if method == "raw" or method is None:
         return y
-
-    if method == "fft":
-        if step_v is None:
-            raise ValueError("step_v is required for the fft filter.")
-
-        filtered, _ = dct_lowpass(
-            y,
-            step_v=step_v,
-            cutoff_cycles_per_v=fft_cutoff,
-        )
-        return filtered
 
     if method == "savgol":
         if sg_poly < 0:
@@ -338,7 +134,21 @@ def apply_filter(
             mode="nearest",
         )
 
-    if dt_s <= 0 or not np.isfinite(dt_s):
+    # DCT filtering is independent of the time-domain sampling rate.
+    if method == "fft":
+        if step_v is None or not np.isfinite(step_v) or step_v <= 0:
+            raise ValueError(
+                "A finite, positive step_v is required for DCT filtering."
+            )
+
+        return dct_lowpass(
+            y,
+            step_v=step_v,
+            cutoff_cycles_per_v=fft_cutoff,
+        )
+
+    # The remaining filters operate in the time domain.
+    if dt_s is None or dt_s <= 0 or not np.isfinite(dt_s):
         raise ValueError("dt_s must be finite and positive.")
 
     fs = 1.0 / dt_s
@@ -386,12 +196,9 @@ def extract_peaks(
     noise_std: float,
 ) -> dict:
     """
-    Split the first CV cycle into forward and reverse branches.
+    Extract anodic and cathodic peaks from the first CV cycle.
 
-    Peak classification follows the scan direction:
-    - If the scan starts below its vertex, the forward branch is anodic.
-    - If the scan starts above its vertex, the reverse branch is anodic.
-
+    The commanded potential determines the vertex and sweep direction.
     Peak potentials are reported using measured potential.
     """
     potential_v = np.asarray(potential_v, dtype=float)
@@ -401,28 +208,42 @@ def extract_peaks(
     if not (
         len(potential_v) == len(current) == len(v_cmd_v)
     ):
-        raise ValueError("Potential and current arrays must have equal lengths.")
+        raise ValueError(
+            "Potential and current arrays must have equal lengths."
+        )
 
     if len(current) < 5:
         raise ValueError("Not enough samples for peak extraction.")
 
     if v_vertex > v_start:
         vertex_idx = int(np.argmax(v_cmd_v))
+        anodic_current = current[:vertex_idx + 1]
+        anodic_potential = potential_v[:vertex_idx + 1]
+        cathodic_current = current[vertex_idx:]
+        cathodic_potential = potential_v[vertex_idx:]
     elif v_vertex < v_start:
         vertex_idx = int(np.argmin(v_cmd_v))
+        cathodic_current = current[:vertex_idx + 1]
+        cathodic_potential = potential_v[:vertex_idx + 1]
+        anodic_current = current[vertex_idx:]
+        anodic_potential = potential_v[vertex_idx:]
     else:
         raise ValueError("v_vertex and v_start cannot be equal.")
-
-    fwd_e = potential_v[:vertex_idx + 1]
-    fwd_i = current[:vertex_idx + 1]
-
-    rev_e = potential_v[vertex_idx:]
-    rev_i = current[vertex_idx:]
 
     prominence = (
         5.0 * noise_std
         if np.isfinite(noise_std) and noise_std > 0
         else 0.0
+    )
+
+    anodic_candidates, anodic_props = find_peaks(
+        anodic_current,
+        prominence=prominence,
+    )
+
+    cathodic_candidates, cathodic_props = find_peaks(
+        -cathodic_current,
+        prominence=prominence,
     )
 
     result = {
@@ -432,44 +253,19 @@ def extract_peaks(
         "ipc": np.nan,
     }
 
-    if v_vertex > v_start:
-        anodic_signal = fwd_i
-        cathodic_signal = -rev_i
-        anodic_potential = fwd_e
-        cathodic_potential = rev_e
-        anodic_branch_current = fwd_i
-        cathodic_branch_current = rev_i
-    else:
-        anodic_signal = rev_i
-        cathodic_signal = -fwd_i
-        anodic_potential = rev_e
-        cathodic_potential = fwd_e
-        anodic_branch_current = rev_i
-        cathodic_branch_current = fwd_i
-
-    anodic_candidates, anodic_props = find_peaks(
-        anodic_signal,
-        prominence=prominence,
-    )
-
-    cathodic_candidates, cathodic_props = find_peaks(
-        cathodic_signal,
-        prominence=prominence,
-    )
-
     if len(anodic_candidates) > 0:
         best = int(np.argmax(anodic_props["prominences"]))
         anodic_idx = int(anodic_candidates[best])
 
         result["epa_v"] = float(anodic_potential[anodic_idx])
-        result["ipa"] = float(anodic_branch_current[anodic_idx])
+        result["ipa"] = float(anodic_current[anodic_idx])
 
     if len(cathodic_candidates) > 0:
         best = int(np.argmax(cathodic_props["prominences"]))
         cathodic_idx = int(cathodic_candidates[best])
 
         result["epc_v"] = float(cathodic_potential[cathodic_idx])
-        result["ipc"] = float(cathodic_branch_current[cathodic_idx])
+        result["ipc"] = float(cathodic_current[cathodic_idx])
 
     return result
 
@@ -564,10 +360,7 @@ def evaluate_filter_against_raw(
 
 
 def compute_repeat_rsd(values: list[float]) -> float:
-    """
-    Calculate sample relative standard deviation (%) across
-    at least three valid repeat measurements.
-    """
+    """Calculate sample relative standard deviation across at least three repeats."""
     arr = np.asarray(values, dtype=float)
     arr = arr[np.isfinite(arr)]
 
@@ -585,58 +378,101 @@ def compute_repeat_rsd(values: list[float]) -> float:
 
 
 def save_spectrum_diagnostic(
-    spectrum_path: Path,
-    forward_diagnostic: dict,
-    reverse_diagnostic: dict,
-) -> None:
-    """Save DCT power spectra for the forward and reverse branches."""
+    forward_current: np.ndarray,
+    reverse_current: np.ndarray,
+    step_v: float,
+    output_path: Path,
+    manual_cutoff: float | None = None,
+) -> dict:
+    """
+    Save forward and reverse DCT spectra in one diagnostic figure.
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+    The plotted power is coefficient squared. The estimated noise
+    power floor is sigma squared, using the reference estimator.
+    """
+    branches = {
+        "Forward branch": forward_current,
+        "Reverse branch": reverse_current,
+    }
 
-    for label, diagnostic in (
-        ("Forward branch", forward_diagnostic),
-        ("Reverse branch", reverse_diagnostic),
-    ):
-        frequencies = diagnostic["frequencies"]
-        power = diagnostic["power"]
-        cutoff = diagnostic["cutoff_cycles_per_v"]
-        noise_sigma = diagnostic["noise_sigma"]
+    fig, axes = plt.subplots(
+        2,
+        1,
+        figsize=(10, 8),
+        facecolor="white",
+    )
 
-        positive = frequencies > 0
-        epsilon = np.finfo(float).tiny
+    diagnostics = {}
 
-        ax.plot(
-            frequencies[positive],
-            np.log10(np.maximum(power[positive], epsilon)),
-            linewidth=1.2,
-            label=label,
-        )
-
-        if np.isfinite(noise_sigma):
-            noise_power = max(noise_sigma ** 2, epsilon)
-            ax.axhline(
-                np.log10(noise_power),
-                linestyle=":",
-                linewidth=1.0,
-                alpha=0.7,
+    try:
+        for ax, (branch_name, branch_current) in zip(
+            axes,
+            branches.items(),
+        ):
+            frequencies, coefficients = dct_spectrum(
+                branch_current,
+                step_v,
             )
 
-        ax.axvline(
-            cutoff,
-            linestyle="--",
-            linewidth=1.2,
-            label=f"{label} cutoff: {cutoff:.2f} cycles/V",
-        )
+            estimated_cutoff, sigma = estimate_cutoff(
+                branch_current,
+                step_v,
+            )
 
-    ax.set_xlabel("Spatial frequency [cycles/V]")
-    ax.set_ylabel("Log10 DCT power")
-    ax.set_title("DCT spectrum and selected low-pass cutoffs")
-    ax.legend()
-    ax.grid(False)
+            chosen_cutoff = (
+                float(manual_cutoff)
+                if manual_cutoff is not None
+                else float(estimated_cutoff)
+            )
 
-    fig.tight_layout()
-    fig.savefig(spectrum_path, dpi=200)
-    plt.close(fig)
+            power = coefficients**2
+            noise_power = sigma**2
+
+            tiny = np.finfo(float).tiny
+
+            ax.plot(
+                frequencies[1:],
+                np.log10(np.maximum(power[1:], tiny)),
+                color="black",
+                linewidth=1.0,
+            )
+
+            ax.axhline(
+                np.log10(max(noise_power, tiny)),
+                color="red",
+                linestyle="--",
+                label="Estimated noise power floor",
+            )
+
+            ax.axvline(
+                chosen_cutoff,
+                color="blue",
+                linestyle=":",
+                label=f"Cutoff = {chosen_cutoff:.2f} cycles/V",
+            )
+
+            ax.set_title(branch_name)
+            ax.set_xlabel("Spatial frequency [cycles/V]")
+            ax.set_ylabel("log10(DCT coefficient power)")
+            ax.legend()
+            ax.grid(False)
+
+            diagnostics[branch_name.lower().replace(" ", "_")] = {
+                "noise_sigma": float(sigma),
+                "noise_power": float(noise_power),
+                "estimated_cutoff_cycles_per_v": float(
+                    estimated_cutoff
+                ),
+                "chosen_cutoff_cycles_per_v": chosen_cutoff,
+            }
+
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=200)
+
+    finally:
+        plt.close(fig)
+
+    return diagnostics
 
 
 def analyze_single_csv(
@@ -648,11 +484,8 @@ def analyze_single_csv(
     """
     Analyze one complete CV acquisition CSV.
 
-    Uses acquisition metadata to identify scan parameters and isolates
-    the first CV cycle before peak extraction.
-
-    The fft filter is a DCT-II low-pass filter applied independently
-    to the forward and reverse branches.
+    Uses acquisition metadata to identify scan parameters and
+    analyzes the first CV cycle only.
     """
     raw_csv_path = Path(raw_csv_path)
     meta_json_path = raw_csv_path.with_suffix(".meta.json")
@@ -700,6 +533,12 @@ def analyze_single_csv(
     v_end = float(scan_params["v_end"])
     step_v = float(scan_params["step_v"])
     n_cycles = int(scan_params["n_cycles"])
+
+    if not np.isfinite(step_v) or step_v <= 0:
+        raise ValueError("Metadata step_v must be finite and positive.")
+
+    if v_start == v_vertex:
+        raise ValueError("v_vertex and v_start cannot be equal.")
 
     df = pd.read_csv(raw_csv_path)
 
@@ -753,9 +592,7 @@ def analyze_single_csv(
         raise ValueError("CSV contains non-finite measurement values.")
 
     if len(t) < 3 or np.any(np.diff(t) <= 0):
-        raise ValueError(
-            "Time values must be strictly increasing."
-        )
+        raise ValueError("Time values must be strictly increasing.")
 
     dt = float(np.median(np.diff(t)))
 
@@ -776,46 +613,30 @@ def analyze_single_csv(
     else:
         vertex_idx = int(np.argmin(v_cmd))
 
+    # Keep the vertex in both branches for filtering.
     fwd_current = curr[:vertex_idx + 1]
     rev_current = curr[vertex_idx:]
 
     filter_results = {}
     filtered_traces = {}
-    fft_diagnostics = {}
 
     for method in filter_methods:
         try:
-            if method == "fft":
-                filtered_fwd, forward_diagnostic = dct_lowpass(
-                    fwd_current,
-                    step_v=step_v,
-                    cutoff_cycles_per_v=fft_cutoff,
-                )
+            filtered_fwd = apply_filter(
+                fwd_current,
+                dt_s=dt,
+                method=method,
+                step_v=step_v,
+                fft_cutoff=fft_cutoff,
+            )
 
-                filtered_rev, reverse_diagnostic = dct_lowpass(
-                    rev_current,
-                    step_v=step_v,
-                    cutoff_cycles_per_v=fft_cutoff,
-                )
-
-                fft_diagnostics = {
-                    "forward": forward_diagnostic,
-                    "reverse": reverse_diagnostic,
-                }
-            else:
-                filtered_fwd = apply_filter(
-                    fwd_current,
-                    dt_s=dt,
-                    method=method,
-                    step_v=step_v,
-                )
-
-                filtered_rev = apply_filter(
-                    rev_current,
-                    dt_s=dt,
-                    method=method,
-                    step_v=step_v,
-                )
+            filtered_rev = apply_filter(
+                rev_current,
+                dt_s=dt,
+                method=method,
+                step_v=step_v,
+                fft_cutoff=fft_cutoff,
+            )
 
             filtered_current = np.concatenate(
                 [filtered_fwd, filtered_rev[1:]]
@@ -842,14 +663,6 @@ def analyze_single_csv(
                 **filter_validation,
             }
 
-            if method == "fft":
-                filter_results[method]["forward_cutoff_cycles_per_v"] = (
-                    forward_diagnostic["cutoff_cycles_per_v"]
-                )
-                filter_results[method]["reverse_cutoff_cycles_per_v"] = (
-                    reverse_diagnostic["cutoff_cycles_per_v"]
-                )
-
         except (ValueError, RuntimeError) as exc:
             filter_results[method] = {
                 "skipped": True,
@@ -857,38 +670,72 @@ def analyze_single_csv(
             }
 
     spectrum_path = None
+    spectrum_diagnostics = None
 
-    if fft_diagnostics:
+    if "fft" in filter_methods:
         spectrum_path = raw_csv_path.with_name(
             f"{raw_csv_path.stem}_spectrum.png"
         )
 
-        save_spectrum_diagnostic(
-            spectrum_path,
-            fft_diagnostics["forward"],
-            fft_diagnostics["reverse"],
+        try:
+            spectrum_diagnostics = save_spectrum_diagnostic(
+                fwd_current,
+                rev_current,
+                step_v,
+                spectrum_path,
+                manual_cutoff=fft_cutoff,
+            )
+        except (ValueError, RuntimeError) as exc:
+            spectrum_diagnostics = {
+                "skipped": True,
+                "reason": str(exc),
+            }
+            spectrum_path = None
+
+    # Read electrode information from the acquisition metadata,
+    # not the current machine's global configuration.
+    area_cm2 = program_config.get("electrode_area_cm2")
+    calibrated = bool(program_config.get("calibrated", False))
+
+    if area_cm2 is not None:
+        area_cm2 = float(area_cm2)
+
+        if not np.isfinite(area_cm2) or area_cm2 <= 0:
+            area_cm2 = None
+
+    calibration_warning = None
+
+    if not calibrated:
+        calibration_warning = (
+            "WARNING: This acquisition is marked as uncalibrated. "
+            "Treat absolute potential and current values as provisional."
         )
+        warnings.warn(calibration_warning, RuntimeWarning)
 
     plot_path = None
 
     if save_plot:
-        fig, ax = plt.subplots(figsize=(10, 7), facecolor="white")
+        fig, ax = plt.subplots(
+            figsize=(10, 7),
+            facecolor="white",
+        )
         ax.set_facecolor("white")
 
-        area_cm2 = program_config.get("electrode_area_cm2")
         if area_cm2 is not None:
-            area_cm2 = float(area_cm2)
-
-        if area_cm2 is not None and area_cm2 > 0.0:
             plot_curr = curr / (area_cm2 * 1000.0)
             plot_filtered = (
-                filtered_traces.get("savgol", curr)
-                / (area_cm2 * 1000.0)
+                filtered_traces["savgol"] / (area_cm2 * 1000.0)
+                if "savgol" in filtered_traces
+                else plot_curr
             )
             y_label = "Current density [mA cm$^{-2}$]"
         else:
             plot_curr = curr
-            plot_filtered = filtered_traces.get("savgol", curr)
+            plot_filtered = (
+                filtered_traces["savgol"]
+                if "savgol" in filtered_traces
+                else curr
+            )
             y_label = "Current [µA]"
 
         fwd_order = np.argsort(pot[:vertex_idx + 1])
@@ -896,14 +743,16 @@ def analyze_single_csv(
 
         fwd_pot = pot[:vertex_idx + 1][fwd_order]
         rev_pot = pot[vertex_idx:][rev_order]
-        fwd_curr = plot_curr[:vertex_idx + 1][fwd_order]
-        rev_curr = plot_curr[vertex_idx:][rev_order]
+
+        fwd_plot_curr = plot_curr[:vertex_idx + 1][fwd_order]
+        rev_plot_curr = plot_curr[vertex_idx:][rev_order]
+
         fwd_filtered = plot_filtered[:vertex_idx + 1][fwd_order]
         rev_filtered = plot_filtered[vertex_idx:][rev_order]
 
         ax.plot(
             fwd_pot,
-            fwd_curr,
+            fwd_plot_curr,
             color="black",
             linewidth=1.0,
             alpha=0.9,
@@ -911,7 +760,7 @@ def analyze_single_csv(
         )
         ax.plot(
             rev_pot,
-            rev_curr,
+            rev_plot_curr,
             color="black",
             linewidth=1.0,
             alpha=0.9,
@@ -952,14 +801,15 @@ def analyze_single_csv(
             spine.set_linewidth(1.5)
             spine.set_color("black")
 
+        # Derive the displayed potential range from the actual scan.
         x_min = min(v_start, v_vertex, v_end)
         x_max = max(v_start, v_vertex, v_end)
         x_span = max(x_max - x_min, step_v)
 
-        x_padding = 0.04 * x_span
+        x_margin = 0.05 * x_span
         ax.set_xlim(
-            x_min - x_padding,
-            x_max + x_padding,
+            x_min - x_margin,
+            x_max + x_margin,
         )
 
         x_ticks = np.linspace(x_min, x_max, 6)
@@ -971,6 +821,7 @@ def analyze_single_csv(
         y_min = float(np.min(plot_curr))
         y_max = float(np.max(plot_curr))
         y_span = max(y_max - y_min, 1e-9)
+
         ax.set_ylim(
             y_min - 0.12 * y_span,
             y_max + 0.12 * y_span,
@@ -980,26 +831,6 @@ def analyze_single_csv(
             plt.FuncFormatter(lambda value, _: f"{value:g}")
         )
 
-        calibrated = program_config.get("calibrated", False)
-
-        if not calibrated:
-            ax.text(
-                0.02,
-                0.98,
-                "WARNING: Data is marked as not calibrated",
-                transform=ax.transAxes,
-                ha="left",
-                va="top",
-                color="red",
-                fontsize=11,
-                fontweight="bold",
-                bbox={
-                    "facecolor": "white",
-                    "edgecolor": "red",
-                    "alpha": 0.9,
-                },
-            )
-
         ax.grid(False)
 
         epa = raw_peaks["epa_v"]
@@ -1007,7 +838,7 @@ def analyze_single_csv(
         epc = raw_peaks["epc_v"]
         ipc = raw_peaks["ipc"]
 
-        if area_cm2 is not None and area_cm2 > 0.0:
+        if area_cm2 is not None:
             ipa = ipa / (area_cm2 * 1000.0)
             ipc = ipc / (area_cm2 * 1000.0)
 
@@ -1041,7 +872,7 @@ def analyze_single_csv(
                 fontweight="bold",
             )
             ax.annotate(
-                "j$_{PA}$",
+                "j$_{PA}$" if area_cm2 is not None else "i$_{PA}$",
                 xy=(epa, ipa),
                 xytext=(12, 0),
                 textcoords="offset points",
@@ -1069,7 +900,7 @@ def analyze_single_csv(
                 linewidth=1.6,
             )
             ax.annotate(
-                "j$_{PC}$",
+                "j$_{PC}$" if area_cm2 is not None else "i$_{PC}$",
                 xy=(epc, ipc),
                 xytext=(12, -18),
                 textcoords="offset points",
@@ -1089,6 +920,19 @@ def analyze_single_csv(
                 fontweight="bold",
             )
 
+        if calibration_warning:
+            ax.text(
+                0.02,
+                0.98,
+                "UNCALIBRATED DATA",
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                color="red",
+                fontsize=11,
+                fontweight="bold",
+            )
+
         fig.tight_layout(pad=1.0)
 
         plot_path = raw_csv_path.with_suffix(".png")
@@ -1099,13 +943,20 @@ def analyze_single_csv(
         "file": raw_csv_path.name,
         "metadata_file": meta_json_path.name,
         "plot_file": plot_path.name if plot_path else None,
-        "spectrum_file": spectrum_path.name if spectrum_path else None,
-        "simulated": bool(metadata.get("simulated", False)),
+        "spectrum_file": (
+            spectrum_path.name if spectrum_path else None
+        ),
+        "spectrum_diagnostics": spectrum_diagnostics,
         "cycles_analyzed": 1,
+        "simulated": bool(metadata.get("simulated", False)),
+        "calibrated": calibrated,
+        "calibration_warning": calibration_warning,
+        "electrode_area_cm2": area_cm2,
         "raw_noise": raw_noise,
         "raw_peaks": raw_peaks,
         "filters": filter_results,
     }
+
 
 
 
